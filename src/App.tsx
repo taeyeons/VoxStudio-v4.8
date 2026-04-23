@@ -81,8 +81,133 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"book" | "cast" | "studio">("book");
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSource, setShowSource] = useState(true);
+  const [syncScroll, setSyncScroll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingCharId, setEditingCharId] = useState<string | null>(null);
+  const [editingSidebarChapterId, setEditingSidebarChapterId] = useState<string | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const sourceScrollRef = useRef<HTMLDivElement>(null);
+  const scriptScrollRef = useRef<HTMLDivElement>(null);
+  const isScrollingRef = useRef<boolean>(false);
+
+  // --- 侧边栏拖拽重置尺寸 ---
+  const startResizing = () => setIsResizing(true);
+  const stopResizing = () => setIsResizing(false);
+  const onResize = (e: MouseEvent) => {
+    if (isResizing) {
+      const newWidth = Math.min(Math.max(200, e.clientX), 450);
+      setSidebarWidth(newWidth);
+    }
+  };
+
+  useEffect(() => {
+    if (isResizing) {
+      window.addEventListener("mousemove", onResize);
+      window.addEventListener("mouseup", stopResizing);
+    } else {
+      window.removeEventListener("mousemove", onResize);
+      window.removeEventListener("mouseup", stopResizing);
+    }
+    return () => {
+      window.removeEventListener("mousemove", onResize);
+      window.removeEventListener("mouseup", stopResizing);
+    };
+  }, [isResizing]);
+
+  // --- 同步滚动逻辑 (基于元素索引的语义映射) ---
+  const handleSourceScroll = () => {
+    if (!syncScroll || !sourceScrollRef.current || !scriptScrollRef.current || isScrollingRef.current) return;
+    isScrollingRef.current = true;
+    
+    const src = sourceScrollRef.current;
+    const wb = scriptScrollRef.current;
+    const paras = Array.from(src.querySelectorAll('p'));
+    const cards = Array.from(wb.querySelectorAll('.script-card'));
+
+    if (paras.length === 0 || cards.length === 0) {
+      isScrollingRef.current = false;
+      return;
+    }
+
+    // 1. 寻找距离左侧中心最近的原文段落
+    const srcMid = src.scrollTop + (src.clientHeight / 2);
+    let closestParaIdx = 0;
+    let minDiff = Infinity;
+
+    paras.forEach((p, idx) => {
+        const pMid = p.offsetTop + (p.clientHeight / 2);
+        const diff = Math.abs(pMid - srcMid);
+        if (diff < minDiff) {
+            minDiff = diff;
+            closestParaIdx = idx;
+        }
+    });
+
+    paras.forEach((p, idx) => p.classList.toggle('active', idx === closestParaIdx));
+
+    // 2. 语义映射：计算原文段落进度，映射到右侧剧本卡片索引
+    const ratio = paras.length > 1 ? closestParaIdx / (paras.length - 1) : 0;
+    const targetCardIdx = Math.round(ratio * (cards.length - 1));
+
+    cards.forEach((c, idx) => c.classList.toggle('active-card', idx === targetCardIdx));
+
+    // 3. 将右侧对应的卡片滚动到视口中心位置
+    const targetCard = cards[targetCardIdx] as HTMLElement;
+    if (targetCard) {
+        const targetWbScroll = targetCard.offsetTop + (targetCard.clientHeight / 2) - (wb.clientHeight / 2);
+        wb.scrollTo({ top: targetWbScroll });
+    }
+    
+    setTimeout(() => { isScrollingRef.current = false; }, 50);
+  };
+
+  const handleScriptScroll = () => {
+    if (!syncScroll || !sourceScrollRef.current || !scriptScrollRef.current || isScrollingRef.current) return;
+    isScrollingRef.current = true;
+
+    const wb = scriptScrollRef.current;
+    const src = sourceScrollRef.current;
+    const paras = Array.from(src.querySelectorAll('p'));
+    const cards = Array.from(wb.querySelectorAll('.script-card'));
+
+    if (paras.length === 0 || cards.length === 0) {
+      isScrollingRef.current = false;
+      return;
+    }
+
+    // 1. 寻找距离右侧中心最近的剧本卡片
+    const wbMid = wb.scrollTop + (wb.clientHeight / 2);
+    let closestCardIdx = 0;
+    let minDiff = Infinity;
+
+    cards.forEach((c, idx) => {
+        const cMid = c.offsetTop + (c.clientHeight / 2);
+        const diff = Math.abs(cMid - wbMid);
+        if (diff < minDiff) {
+            minDiff = diff;
+            closestCardIdx = idx;
+        }
+    });
+
+    cards.forEach((c, idx) => c.classList.toggle('active-card', idx === closestCardIdx));
+
+    // 2. 语义映射：计算剧本进度，映射回左侧原文对应的段落索引
+    const ratio = cards.length > 1 ? closestCardIdx / (cards.length - 1) : 0;
+    const targetParaIdx = Math.round(ratio * (paras.length - 1));
+
+    paras.forEach((p, idx) => p.classList.toggle('active', idx === targetParaIdx));
+
+    // 3. 将左侧对应的原文段落滚动到视口中心位置
+    const targetPara = paras[targetParaIdx] as HTMLElement;
+    if (targetPara) {
+        const targetSrcScroll = targetPara.offsetTop + (targetPara.clientHeight / 2) - (src.clientHeight / 2);
+        src.scrollTo({ top: targetSrcScroll });
+    }
+
+    setTimeout(() => { isScrollingRef.current = false; }, 50);
+  };
 
   // --- 初始化加载 ---
   useEffect(() => {
@@ -174,6 +299,26 @@ export default function App() {
     setCharacters([{ id: "nar", name: "旁白", age: "成熟", gender: "中性", tone: "磁性睿智", description: "环境烘托与情节转场" }]);
     setActiveTab("book");
     setShowProjectModal(false);
+  };
+
+  const saveAsProject = () => {
+    const newId = `proj-${Date.now()}`;
+    const newName = `${projectName} (副本)`;
+    const newProject: Project = {
+      id: newId,
+      name: newName,
+      lastModified: Date.now(),
+      chapters,
+      characters,
+      prodStyle,
+      readingSpeed,
+      theme
+    };
+    setSavedProjects(prev => [newProject, ...prev]);
+    setProjectId(newId);
+    setProjectName(newName);
+    setShowSaveToast(true);
+    setTimeout(() => setShowSaveToast(false), 2000);
   };
 
   const exportProjectToJSON = (project: Project) => {
@@ -279,10 +424,16 @@ export default function App() {
       });
       
       let rawText = response.text || "[]";
-      const jsonMatch = rawText.match(/\[[\s\S]*\]/);
-      if (jsonMatch) rawText = jsonMatch[0];
       
-      const extracted = JSON.parse(rawText);
+      // 更鲁棒的 JSON 提取逻辑：寻找第一个 [ 和最后一个 ] 之间的内容
+      const firstBracket = rawText.indexOf('[');
+      const lastBracket = rawText.lastIndexOf(']');
+      
+      if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+        rawText = rawText.substring(firstBracket, lastBracket + 1);
+      }
+      
+      const extracted = JSON.parse(rawText.trim());
       const existing = new Set(characters.map(c => c.name));
       const fresh = extracted.filter((c: any) => !existing.has(c.name)).map((c: any, i: number) => ({ ...c, id: `char-${Date.now()}-${i}` }));
       setCharacters(prev => [...prev, ...fresh]);
@@ -368,24 +519,51 @@ export default function App() {
       </nav>
 
       <main className="flex-1 flex overflow-hidden">
-        <aside className={`w-64 border-r ${currentTheme.border} ${currentTheme.sidebar} flex flex-col shrink-0 transition-colors`}>
+        <aside 
+          style={{ width: sidebarWidth }}
+          className={`border-r ${currentTheme.border} ${currentTheme.sidebar} flex flex-col shrink-0 transition-all duration-75 relative`}
+        >
           <div className={`p-5 flex justify-between items-center ${theme === 'light' ? 'bg-slate-200/50' : 'bg-slate-950/20'} border-b ${currentTheme.border}`}>
             <span className="text-[10px] font-black opacity-30 uppercase tracking-widest">Directory / 章节</span>
             <button onClick={() => { const id = `ch-${Date.now()}`; setChapters([...chapters, { id, title: "新章节文本", novelText: "", scriptText: "", parsedElements: [] }]); setCurrentChapterId(id); }} className="p-1.5 text-sky-500 hover:bg-sky-500/10 rounded-lg transition-all"><Plus className="w-4 h-4" /></button>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-1 scrollbar-hide">
+          <div className="flex-1 overflow-y-auto p-3 space-y-1.5 scrollbar-hide">
             {chapters.map((ch, idx) => (
               <div key={ch.id} onClick={() => setCurrentChapterId(ch.id)} className={`group relative p-4 rounded-2xl cursor-pointer border transition-all ${currentChapterId === ch.id ? (theme === 'light' ? 'bg-sky-500 text-white border-sky-600/20 shadow-lg' : 'bg-sky-600/10 border-sky-500/40 text-sky-400') : `border-transparent opacity-60 hover:opacity-100 ${theme === 'light' ? 'hover:bg-slate-200' : 'hover:bg-slate-900/50'}`}`}>
-                <div className={`text-[8px] font-mono opacity-40 mb-1 ${currentChapterId === ch.id && theme === 'light' ? 'text-white' : ''}`}>CH-{(idx+1).toString().padStart(2,'0')}</div>
-                <div className="text-xs font-black truncate pr-6">{ch.title}</div>
+                <div className="flex flex-col gap-1 pr-14">
+                  <div className={`text-[8px] font-mono opacity-40 ${currentChapterId === ch.id && theme === 'light' ? 'text-white' : ''}`}>CH-{(idx+1).toString().padStart(2,'0')}</div>
+                  {editingSidebarChapterId === ch.id ? (
+                    <input 
+                      autoFocus
+                      className={`bg-black/20 text-white border-none outline-none text-xs font-black p-1.5 rounded-lg w-full ring-1 ring-white/20`}
+                      value={ch.title}
+                      onChange={(e) => updateChapterData({ title: e.target.value })}
+                      onBlur={() => setEditingSidebarChapterId(null)}
+                      onKeyDown={(e) => e.key === 'Enter' && setEditingSidebarChapterId(null)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  ) : (
+                    <div className="text-xs font-black leading-tight break-words">{ch.title}</div>
+                  )}
+                </div>
                 {ch.scriptText && <div className={`absolute top-4 right-4 w-1.5 h-1.5 ${currentChapterId === ch.id && theme === 'light' ? 'bg-white' : 'bg-sky-500'} rounded-full`} />}
-                <button onClick={(e) => { e.stopPropagation(); if(chapters.length > 1) setChapters(chapters.filter(c => c.id !== ch.id)) }} className={`absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 p-1.5 text-red-500 hover:bg-red-500/10 rounded-lg ${currentChapterId === ch.id && theme === 'light' ? 'text-white' : ''}`}><Trash2 className="w-3.5 h-3.5" /></button>
+                <div className={`absolute bottom-3 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-all z-10`}>
+                  <button onClick={(e) => { e.stopPropagation(); setEditingSidebarChapterId(ch.id); }} className={`p-1.5 hover:bg-black/10 rounded-lg transition-all ${currentChapterId === ch.id && theme === 'light' ? 'text-white' : 'text-sky-500'}`} title="编辑"><Settings className="w-3.5 h-3.5" /></button>
+                  <button onClick={(e) => { e.stopPropagation(); if(chapters.length > 1) setChapters(chapters.filter(c => c.id !== ch.id)) }} className={`p-1.5 text-red-500 hover:bg-red-500/10 rounded-lg ${currentChapterId === ch.id && theme === 'light' ? 'text-white' : ''}`} title="删除"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
               </div>
             ))}
           </div>
           <div className={`mt-auto p-6 ${theme === 'light' ? 'bg-slate-100' : 'bg-slate-950/40'} border-t ${currentTheme.border} space-y-4`}>
              <div className="flex justify-between items-center"><span className="text-[9px] font-black opacity-40 uppercase">Global Words</span><span className={`text-xs font-mono font-black ${currentTheme.accent}`}>{totalNovelWords.toLocaleString()}</span></div>
              <div className="flex justify-between items-center"><span className="text-[9px] font-black opacity-40 uppercase">Est. Runtime</span><span className={`text-xs font-mono font-black ${currentTheme.accent}`}>{totalScriptDuration.toFixed(1)} MIN</span></div>
+          </div>
+          {/* Resize Handle */}
+          <div 
+            onMouseDown={startResizing}
+            className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-sky-500 transition-all active:bg-sky-600 z-50 group"
+          >
+            <div className="h-full w-full opacity-0 group-hover:opacity-100 bg-sky-500/20" />
           </div>
         </aside>
 
@@ -500,11 +678,25 @@ export default function App() {
                     <AnimatePresence>
                       {showSource && (
                         <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: "38%", opacity: 1 }} exit={{ width: 0, opacity: 0 }} className={`flex flex-col border ${currentTheme.border} rounded-[3rem] ${theme === 'light' ? 'bg-white shadow-2xl shadow-slate-200/50' : 'bg-slate-950/50 shadow-2xl shadow-black/40'} overflow-hidden shrink-0 relative`}>
-                           <div className={`p-6 border-b ${currentTheme.border} flex justify-between items-center ${theme === 'light' ? 'bg-slate-50' : 'bg-black/40'}`}>
+                           <div className={`px-6 py-2 border-b ${currentTheme.border} flex justify-between items-center ${theme === 'light' ? 'bg-slate-50' : 'bg-black/40'}`}>
                               <span className="text-[10px] font-black opacity-30 uppercase tracking-[0.2em] italic">Original Asset</span>
-                              <button onClick={() => setShowSource(false)} className={`p-2.5 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100 text-slate-400' : 'hover:bg-white/10 text-slate-600'}`}><EyeOff className="w-5 h-5" /></button>
+                              <button onClick={() => setShowSource(false)} className={`p-1 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100 text-slate-400' : 'hover:bg-white/10 text-slate-600'}`}><EyeOff className="w-4 h-4" /></button>
                            </div>
-                           <textarea className="flex-1 p-10 bg-transparent resize-none border-none outline-none text-sm opacity-50 leading-relaxed scrollbar-hide whitespace-pre-wrap italic font-medium" value={currentChapter.novelText} readOnly />
+                           <div 
+                             ref={sourceScrollRef}
+                             onScroll={handleSourceScroll}
+                             className="flex-1 p-10 pt-6 overflow-y-auto scrollbar-hide space-y-6"
+                           >
+                             {currentChapter.novelText.split("\n").filter(p => p.trim()).map((para, pIdx) => (
+                               <p 
+                                 key={pIdx} 
+                                 className={`text-sm leading-relaxed transition-all duration-700 font-medium italic ${syncScroll ? 'opacity-20 hover:opacity-100 [&.active]:opacity-100 [&.active]:text-sky-500 [&.active]:font-black [&.active]:underline [&.active]:decoration-sky-500/30 [&.active]:underline-offset-4 [&.active]:scale-[1.02] origin-left' : 'opacity-80'}`}
+                                 data-para-index={pIdx}
+                               >
+                                 {para}
+                               </p>
+                             ))}
+                           </div>
                         </motion.div>
                       )}
                     </AnimatePresence>
@@ -513,14 +705,29 @@ export default function App() {
                        <div className={`px-10 py-5 border-b ${theme === 'light' ? 'border-sky-50 bg-sky-50/30' : 'border-sky-500/10 bg-sky-950/30'} flex justify-between items-center shrink-0`}>
                           <div className="flex items-center gap-6">
                              {!showSource && <button onClick={() => setShowSource(true)} className="p-3 bg-sky-500/10 text-sky-500 rounded-2xl hover:bg-sky-500/20 transition-all shadow-lg active:scale-95"><Eye className="w-5 h-5" /></button>}
-                             <span className={`text-[10px] font-black ${theme === 'light' ? 'text-sky-700' : 'text-sky-400'} uppercase tracking-[0.5em] italic`}>Production workbench</span>
+                             <div className="flex flex-col">
+                               <span className={`text-[10px] font-black ${theme === 'light' ? 'text-sky-700' : 'text-sky-400'} uppercase tracking-[0.5em] italic`}>Production workbench</span>
+                               {showSource && (
+                                 <button onClick={() => setSyncScroll(!syncScroll)} className={`mt-1 flex items-center gap-2 group`}>
+                                   <div className={`w-6 h-3 rounded-full transition-all relative ${syncScroll ? 'bg-sky-500' : 'bg-slate-300'}`}>
+                                     <div className={`absolute top-0.5 w-2 h-2 rounded-full bg-white transition-all ${syncScroll ? 'left-3.5' : 'left-0.5'}`} />
+                                   </div>
+                                   <span className={`text-[8px] font-black uppercase tracking-widest ${syncScroll ? 'text-sky-500' : 'opacity-30'}`}>Sync Scroll {syncScroll ? 'On' : 'Off'}</span>
+                                 </button>
+                               )}
+                             </div>
                           </div>
                           <div className="flex items-center gap-4"><span className="text-[9px] font-mono opacity-30 font-black">CHAPTER NODES: {currentChapter.parsedElements.length}</span></div>
                        </div>
-                       <div className="flex-1 p-10 overflow-y-auto space-y-8 scrollbar-hide pb-24">
+                       <div 
+                        ref={scriptScrollRef}
+                        onScroll={handleScriptScroll}
+                        className="flex-1 p-10 overflow-y-auto space-y-8 scrollbar-hide pb-24"
+                       >
                           {currentChapter.parsedElements.map((el) => (
-                            <div key={el.id} className={`p-10 rounded-[3rem] border transition-all duration-500 group relative ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50 border-amber-200 shadow-sm' : 'bg-amber-500/10 border-amber-500/30 ring-8 ring-amber-500/5') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-white/[0.04] border-white/5')}`}>
-                               <div className="flex items-center gap-5 mb-6">
+                            <div key={el.id} className={`script-card p-10 rounded-[3rem] border transition-all duration-500 group relative overflow-hidden ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50 border-amber-200 shadow-sm' : 'bg-amber-500/10 border-amber-500/30 ring-8 ring-amber-500/5') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-white/[0.04] border-white/5')} ${syncScroll ? '[&.active-card]:ring-4 [&.active-card]:ring-sky-500/40 [&.active-card]:border-sky-400 [&.active-card]:scale-[1.02] [&.active-card]:shadow-2xl [&.active-card]:opacity-100 opacity-40 hover:opacity-100' : 'opacity-100'}`}>
+                               <div className="absolute left-0 top-0 bottom-0 w-2.5 bg-sky-500 opacity-0 group-[.active-card]:opacity-100 transition-opacity duration-500" />
+                               <div className="flex items-center gap-5 mb-6 relative">
                                   <span className={`text-[10px] font-black px-5 py-2 rounded-full shadow-lg tracking-[0.2em] uppercase ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-black' : 'bg-pink-600 text-white'}`}>{el.type === 'dialogue' ? el.speaker : el.type === 'narration' ? '旁白' : '场景音效'}</span>
                                   <span className={`text-xs italic font-mono font-black opacity-30 ${theme === 'light' ? 'text-slate-900' : 'text-slate-400'} lowercase`}>{">"} {el.meta}</span>
                                </div>
@@ -580,6 +787,9 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex gap-2">
+                  <button onClick={saveAsProject} className={`px-6 py-3 ${theme === 'light' ? 'bg-amber-500' : 'bg-amber-600'} rounded-xl text-[10px] font-black text-white flex items-center gap-2 hover:translate-y-[-2px] transition-all shadow-xl`}>
+                    <Copy className="w-3.5 h-3.5" /> 另存为新项目
+                  </button>
                   <label className={`cursor-pointer px-6 py-3 ${theme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-900' : 'bg-black/40 border-white/5 text-white'} border rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-sky-500 hover:text-white transition-all shadow-lg active:translate-y-0.5`}>
                     <Upload className="w-3.5 h-3.5" /> 导入项目
                     <input type="file" accept=".json" className="hidden" onChange={handleImportProject} />
