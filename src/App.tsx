@@ -90,6 +90,7 @@ export default function App() {
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizing, setIsResizing] = useState(false);
+  const hoveredCardRef = useRef<number | null>(null);
 
   const sourceScrollRef = useRef<HTMLDivElement>(null);
   const scriptScrollRef = useRef<HTMLDivElement>(null);
@@ -119,6 +120,28 @@ export default function App() {
     };
   }, [isResizing]);
 
+  // 更新高亮公用函数
+  const applyHighlights = (cardIdx: number) => {
+    const src = sourceScrollRef.current;
+    const wb = scriptScrollRef.current;
+    if (!src || !wb) return;
+    
+    const paras = Array.from(src.querySelectorAll('p')) as HTMLElement[];
+    const cards = Array.from(wb.querySelectorAll('.script-card')) as HTMLElement[];
+    
+    cards.forEach((c, idx) => c.classList.toggle('active-card', idx === cardIdx));
+
+    const activeElement = currentChapter.parsedElements[cardIdx];
+    let activeParaIds: number[] = [];
+    if (activeElement && activeElement.sourceParaIds && activeElement.sourceParaIds.length > 0) {
+        activeParaIds = activeElement.sourceParaIds;
+    } else {
+        activeParaIds = [Math.round((cardIdx / Math.max(1, cards.length - 1)) * Math.max(0, paras.length - 1))];
+    }
+    
+    paras.forEach((p, idx) => p.classList.toggle('active', activeParaIds.includes(idx)));
+  };
+
   // --- 同步滚动逻辑 (基于智能提取的段落映射) ---
   const handleSourceScroll = () => {
     if (!syncScroll || !sourceScrollRef.current || !scriptScrollRef.current || isScrollingRef.current) return;
@@ -129,7 +152,7 @@ export default function App() {
     const paras = Array.from(src.querySelectorAll('p')) as HTMLElement[];
     const cards = Array.from(wb.querySelectorAll('.script-card')) as HTMLElement[];
 
-    if (paras.length === 0 || cards.length === 0) {
+    if (paras.length === 0 || cards.length === 0 || !currentChapter.parsedElements.length) {
       isScrollingRef.current = false;
       return;
     }
@@ -147,8 +170,6 @@ export default function App() {
             closestParaIdx = idx;
         }
     });
-
-    paras.forEach((p, idx) => p.classList.toggle('active', idx === closestParaIdx));
 
     // 2. 利用 sourceParaIds 进行精准语义映射
     let targetCardIdx = -1;
@@ -180,7 +201,9 @@ export default function App() {
         targetCardIdx = nearestCard;
     }
 
-    cards.forEach((c, idx) => c.classList.toggle('active-card', idx === targetCardIdx));
+    if (hoveredCardRef.current === null) {
+      applyHighlights(targetCardIdx);
+    }
 
     // 3. 将右侧对应的卡片滚动到视口中心位置
     const targetCard = cards[targetCardIdx] as HTMLElement;
@@ -220,7 +243,9 @@ export default function App() {
         }
     });
 
-    cards.forEach((c, idx) => c.classList.toggle('active-card', idx === closestCardIdx));
+    if (hoveredCardRef.current === null) {
+      applyHighlights(closestCardIdx);
+    }
 
     // 2. 使用该卡片的 sourceParaIds 精准定位左侧段落
     const activeElement = currentChapter.parsedElements[closestCardIdx];
@@ -237,8 +262,6 @@ export default function App() {
 
     // 防止越界
     targetParaIdx = Math.max(0, Math.min(targetParaIdx, paras.length - 1));
-
-    paras.forEach((p, idx) => p.classList.toggle('active', idx === targetParaIdx));
 
     // 3. 将左侧对应的原文段落滚动到视口中心位置
     const targetPara = paras[targetParaIdx] as HTMLElement;
@@ -491,14 +514,15 @@ ${charPrompt}
 必须且只使用以下三种前缀格式（不要任何多余的 Markdown 标记如粗体或代码块），且每个条目必须附带其对应的[原段落编号]（可以多个编号用逗号隔开），格式如下：
 
 【旁白】[0,1]：（情感氛围/语气/节奏指令）负责环境描写、动作描写、时间流逝等原文中非开口说话的外在维度的客观描述。
-【具体的角色名字】[2]：（语气/神态动作/内心活动）负责角色的台词/对白，以及该角色的【内心独白】！绝对不要真的输出“角色名”三个字，必须填写真实的名字！心理活动一律视为该角色自己的对白演绎！如果原文有角色心理活动（如：他心想.../他暗自琢磨...），角色名就是该角色，不要写【旁白】！
+【具体的角色名字】[2]：（语气/神态/心理状态）负责角色的台词/对白，以及该角色的【内心独白】！绝对不要真的输出“角色名”三个字，必须填写真实的名字！心理活动一律视为该角色自己的对白演绎！绝对禁止在角色的小括号中输出肢体动作（如“揉眼睛”、“走向前”），肢体动作一律单拆为旁白！
 【场景音】[3]：（详细的物理环境音效，用以辅助听觉氛围营造）
 
 【执行规范】
-1. 角色台词剥离：逢“某某说：‘你好’”等句式，将“你好”划分为角色对白，将“某某说”通过角色的语气括号备注体现（动作交由旁白）。
-2. 内心活动归属：凡是“XX心想”、“XX暗道”这类内心独白，全部抽离出作为该【具体的角色名字】的对播台词，括号标注（内心独白/心里想）。
-3. 切分节奏：遇到长篇大论的旁白原文，必须将其拆分为多条短【旁白】和【场景音】。
-4. 字句保留：剧本的文本量必须基本等于甚至略大于源小说的文本量，不可以偷工减料。`;
+1. 动作与台词极度分离：凡是物理肢体动作（如揉眼睛、转头、深吸一口气），绝对不能放在角色的发声台词/内心独白里，也不能放在角色的语气括号中！所有的动作必须独立切分出来，交由【旁白】演播。例如原文“他揉揉眼睛，心想：这怎么可能？”，必须严格拆分为——先写一行【旁白】[X]负责动作，再换行写【角色】[X]负责独白。
+2. 角色台词剥离：逢“某某说：‘你好’”等句式，将“你好”划分为角色对白，将“某某说”通过角色的语气括号备注体现（动作交由旁白）。
+3. 内心活动归属：凡是“XX心想”、“XX暗道”这类内心独白，全部抽离出作为该【具体的角色名字】的对播台词，括号标注（内心独白/心里想）。
+4. 切分节奏：遇到长篇大论的旁白原文，必须将其拆分为多条短【旁白】和【场景音】。
+5. 字句保留：剧本的文本量必须基本等于甚至略大于源小说的文本量，不可以偷工减料。`;
       
       const numberedText = currentChapter.novelText.split("\n").filter(p => p.trim()).map((p, i) => `[${i}] ${p}`).join("\n");
 
@@ -795,6 +819,37 @@ ${charPrompt}
                              {currentChapter.novelText.split("\n").filter(p => p.trim()).map((para, pIdx) => (
                                <p 
                                  key={pIdx} 
+                                 onMouseEnter={() => {
+                                   if (!syncScroll) return;
+                                   const src = sourceScrollRef.current;
+                                   const wb = scriptScrollRef.current;
+                                   if (!src || !wb) return;
+                                   const paras = Array.from(src.querySelectorAll('p')) as HTMLElement[];
+                                   const cards = Array.from(wb.querySelectorAll('.script-card')) as HTMLElement[];
+                                   paras.forEach((p, idx) => p.classList.toggle('active', idx === pIdx));
+                                   let targetCardIdx = -1;
+                                   for (let i = 0; i < currentChapter.parsedElements.length; i++) {
+                                       const el = currentChapter.parsedElements[i];
+                                       if (el.sourceParaIds && el.sourceParaIds.includes(pIdx)) { targetCardIdx = i; break; }
+                                   }
+                                   if (targetCardIdx === -1) {
+                                       let nearestCard = 0; let minIdDiff = Infinity;
+                                       for (let i = 0; i < currentChapter.parsedElements.length; i++) {
+                                           const el = currentChapter.parsedElements[i];
+                                           if (el.sourceParaIds && el.sourceParaIds.length > 0) {
+                                               const d = Math.abs(el.sourceParaIds[0] - pIdx);
+                                               if (d < minIdDiff) { minIdDiff = d; nearestCard = i; }
+                                           }
+                                       }
+                                       targetCardIdx = nearestCard;
+                                   }
+                                   cards.forEach((c, idx) => c.classList.toggle('active-card', idx === targetCardIdx));
+                                   hoveredCardRef.current = targetCardIdx;
+                                 }}
+                                 onMouseLeave={() => {
+                                   if (!syncScroll) return;
+                                   hoveredCardRef.current = null;
+                                 }}
                                  className={`text-sm leading-relaxed transition-all duration-700 font-medium italic ${syncScroll ? 'opacity-20 hover:opacity-100 [&.active]:opacity-100 [&.active]:text-sky-500 [&.active]:font-black [&.active]:underline [&.active]:decoration-sky-500/30 [&.active]:underline-offset-4 [&.active]:scale-[1.02] origin-left' : 'opacity-80'}`}
                                  data-para-index={pIdx}
                                >
@@ -833,6 +888,16 @@ ${charPrompt}
                             <Reorder.Item 
                               key={el.id} 
                               value={el}
+                              onMouseEnter={() => {
+                                  if (!syncScroll) return;
+                                  const idx = currentChapter.parsedElements.findIndex(e => e.id === el.id);
+                                  hoveredCardRef.current = idx;
+                                  applyHighlights(idx);
+                              }}
+                              onMouseLeave={() => {
+                                  if (!syncScroll) return;
+                                  hoveredCardRef.current = null;
+                              }}
                               className={`script-card group relative overflow-hidden transition-all duration-500 rounded-3xl border ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50/50 border-amber-200' : 'bg-amber-500/5 border-amber-500/20') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-white/[0.02] border-white/5')} ${syncScroll ? '[&.active-card]:ring-2 [&.active-card]:ring-sky-500/40 [&.active-card]:border-sky-400 [&.active-card]:scale-[1.01] [&.active-card]:shadow-xl [&.active-card]:opacity-100 opacity-40 hover:opacity-100' : 'opacity-100'}`}
                             >
                                <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-sky-500 opacity-0 group-[.active-card]:opacity-100 transition-opacity duration-500" />
@@ -857,7 +922,7 @@ ${charPrompt}
                                       value={el.content}
                                       onChange={(e) => updateScriptElement(el.id, { content: e.target.value })}
                                       onBlur={() => setEditingElementId(null)}
-                                      className={`w-full bg-transparent border-none focus:ring-0 p-0 text-lg leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-white'} resize-none font-medium h-auto min-h-[100px]`}
+                                      className={`w-full bg-transparent !border-none !outline-none !ring-0 !shadow-none p-0 text-lg leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-white'} resize-none font-medium h-auto min-h-[100px]`}
                                     />
                                   ) : (
                                     <p onClick={() => setEditingElementId(el.id)} className={`cursor-text ${el.type === 'dialogue' ? `text-lg font-medium leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-slate-100'}` : el.type === 'sound_effect' ? `text-base italic font-black ${theme === 'light' ? 'text-amber-700' : 'text-amber-400'}` : `text-lg font-medium leading-relaxed opacity-60 italic ${theme === 'light' ? 'text-slate-800' : 'text-slate-300'}`}`}>{el.content}</p>
