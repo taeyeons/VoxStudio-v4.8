@@ -920,7 +920,6 @@ ${charPrompt}
                     <button onClick={() => setCharacters([...characters, { id: `c-${Date.now()}`, name: "新演员", gender: "男", age: "青年", tone: "中性", description: "输入详细设定..." }])} className={`${theme === 'light' ? 'border-slate-200 shadow-sm' : 'border-slate-800 bg-black/5'} border-2 border-dashed rounded-[2rem] flex flex-col items-center justify-center transition-all group hover:border-sky-500 min-h-[260px]`}><Plus className="w-10 h-10 mb-3 group-hover:scale-110 group-hover:text-sky-500 transition-all opacity-20" /><span className="text-[9px] font-black uppercase tracking-[0.4em] opacity-30">Deploy Actor</span></button>
                  </div>
                  <div className="absolute bottom-10 left-12 right-12 flex justify-center pointer-events-none">
-                    <button onClick={() => setActiveTab("studio")} className={`h-16 w-full max-w-xl ${currentTheme.btn} text-white rounded-[2rem] font-black text-xs shadow-[0_20px_50px_rgba(2,132,199,0.3)] flex items-center justify-center gap-4 hover:translate-y-[-6px] transition-all transform-gpu border border-white/20 active:scale-95 pointer-events-auto shadow-2xl`}>部署至演播室并开启自动化生产 <ChevronRight className="w-5 h-5" /></button>
                  </div>
               </motion.div>
             )}
@@ -1029,7 +1028,7 @@ ${charPrompt}
                                   if (!syncScroll) return;
                                   hoveredCardRef.current = null;
                               }}
-                              className={`script-card group relative overflow-hidden transition-all duration-500 rounded-3xl border ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50/50 border-amber-200' : 'bg-amber-500/5 border-amber-500/20') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-white/[0.02] border-white/5')} ${syncScroll ? '[&.active-card]:ring-2 [&.active-card]:ring-sky-500/40 [&.active-card]:border-sky-400 [&.active-card]:scale-[1.01] [&.active-card]:shadow-xl [&.active-card]:opacity-100 opacity-40 hover:opacity-100' : 'opacity-100'}`}
+                              className={`script-card group relative overflow-hidden transition-all duration-500 rounded-3xl border ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50/50 border-amber-200' : theme === 'forest' ? 'bg-yellow-900/40 border-yellow-700/50' : 'bg-amber-900/30 border-amber-800/50') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : theme === 'forest' ? 'bg-emerald-950/40 border-emerald-800/30 shadow-sm' : 'bg-slate-800/50 border-slate-700/50')} ${syncScroll ? '[&.active-card]:ring-2 [&.active-card]:ring-sky-500/40 [&.active-card]:border-sky-400 [&.active-card]:scale-[1.01] [&.active-card]:shadow-xl [&.active-card]:opacity-100 opacity-40 hover:opacity-100' : 'opacity-100'}`}
                             >
                                <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-sky-500 opacity-0 group-[.active-card]:opacity-100 transition-opacity duration-500" />
                                
@@ -1056,8 +1055,8 @@ ${charPrompt}
                                       className={`w-full bg-transparent !border-none !outline-none !ring-0 !shadow-none p-0 text-lg leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-white'} resize-none font-medium h-auto min-h-[100px]`}
                                     />
                                   ) : (
-                                    <p onClick={() => setEditingElementId(el.id)} className={`cursor-text ${el.type === 'dialogue' ? `text-lg font-medium leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-slate-100'}` : el.type === 'sound_effect' ? `text-lg italic font-black ${theme === 'light' ? 'text-amber-700' : 'text-amber-400'}` : `text-lg font-medium leading-relaxed opacity-60 italic ${theme === 'light' ? 'text-slate-800' : 'text-slate-300'}`}`}>
-                                      {el.content || (el.type === 'sound_effect' ? '' : '')}
+                                    <p onClick={() => setEditingElementId(el.id)} className={`cursor-text break-words ${el.type === 'dialogue' ? `text-lg font-medium leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-slate-100'}` : el.type === 'sound_effect' ? `text-lg italic font-black break-all ${theme === 'light' ? 'text-amber-700' : 'text-amber-400'}` : `text-lg font-medium leading-relaxed opacity-60 italic ${theme === 'light' ? 'text-slate-800' : 'text-slate-300'}`}`}>
+                                      {el.content}
                                     </p>
                                   )}
                                </div>
@@ -1078,10 +1077,10 @@ ${charPrompt}
       </main>
 
       {editingCharId && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/95 backdrop-blur-2xl p-6">
-           <div className={`w-full max-w-xl rounded-[4rem] p-16 shadow-2xl relative overflow-hidden ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`}>
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm" onClick={() => setEditingCharId(null)}>
+           <div className={`w-full max-w-xl rounded-[4rem] p-16 shadow-2xl relative overflow-hidden ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`} onClick={(e) => e.stopPropagation()}>
               <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-sky-500 via-sky-300 to-sky-600" />
-              <button onClick={() => setEditingCharId(null)} className="absolute top-12 right-12 opacity-30 hover:opacity-100 transition-all text-current"><Plus className="w-12 h-12 rotate-45" /></button>
+              <button onClick={() => setEditingCharId(null)} className="absolute top-8 right-8 z-10 w-10 h-10 flex items-center justify-center bg-black/5 hover:bg-black/10 rounded-full transition-all text-current"><Plus className="w-8 h-8 rotate-45" /></button>
               <h2 className="text-4xl font-black italic mb-12 tracking-tighter">Edit Persona / 精修建模</h2>
               <div className="space-y-10">
                  <div className="grid grid-cols-2 gap-10">
@@ -1102,14 +1101,14 @@ ${charPrompt}
       )}
 
       {showSettingsModal && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 backdrop-blur-md p-6">
-           <div className={`w-full max-w-2xl flex flex-col rounded-[2.5rem] p-8 lg:p-10 shadow-2xl relative ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`}>
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm" onClick={() => setShowSettingsModal(false)}>
+           <div className={`w-full max-w-2xl flex flex-col rounded-[2.5rem] p-8 lg:p-10 shadow-2xl relative ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`} onClick={(e) => e.stopPropagation()}>
               <div className="flex justify-between items-center mb-8">
                  <div>
                     <h2 className="text-3xl font-black italic tracking-tighter">Settings / 全局配置</h2>
                     <p className="text-sm opacity-50 font-bold mt-1 uppercase tracking-widest">Model & System Configuration</p>
                  </div>
-                 <button onClick={() => setShowSettingsModal(false)} className="p-3 bg-black/5 hover:bg-black/10 rounded-full transition-all"><Plus className="w-6 h-6 rotate-45" /></button>
+                 <button onClick={() => setShowSettingsModal(false)} className="w-10 h-10 flex items-center justify-center bg-black/5 hover:bg-black/10 rounded-full transition-all"><Plus className="w-6 h-6 rotate-45" /></button>
               </div>
 
               <div className="space-y-8">
@@ -1126,9 +1125,12 @@ ${charPrompt}
                        { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite", desc: "速度最快" },
                        { id: "gemini-3-flash-preview", name: "Gemini 3.0 Flash", desc: "日常任务首选" },
                        { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", desc: "高复杂推理" },
-                       { id: "claude-3-5-sonnet-latest", name: "Claude 3.5 Sonnet", desc: "代码与长文" },
+                       { id: "claude-3-7-sonnet-latest", name: "Claude 3.7 Sonnet", desc: "代码与长文增强" },
                        { id: "gpt-4o", name: "GPT-4o", desc: "均衡/综合强" },
+                       { id: "qwen-max-latest", name: "通义千问 Max", desc: "中国大模型" },
+                       { id: "ernie-4.0-8k", name: "文心一言 4.0", desc: "中国大模型" },
                        { id: "deepseek-chat", name: "DeepSeek V3", desc: "平价长文本" },
+                       { id: "deepseek-reasoner", name: "DeepSeek R1", desc: "深度思考" },
                      ].map(m => (
                        <button
                          key={m.id}
@@ -1213,11 +1215,11 @@ ${charPrompt}
       )}
 
       {showExportModal && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 backdrop-blur-md p-6">
-           <div className={`w-full max-w-lg flex flex-col rounded-[2rem] p-8 shadow-2xl relative ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`}>
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm" onClick={() => setShowExportModal(false)}>
+           <div className={`w-full max-w-lg flex flex-col rounded-[2rem] p-8 shadow-2xl relative ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`} onClick={(e) => e.stopPropagation()}>
               <div className="flex justify-between items-center mb-8">
                  <h2 className="text-2xl font-black italic tracking-tighter">Export Script</h2>
-                 <button onClick={() => setShowExportModal(false)} className="p-2 hover:bg-black/10 rounded-full transition-all"><Plus className="w-6 h-6 rotate-45" /></button>
+                 <button onClick={() => setShowExportModal(false)} className="w-10 h-10 flex items-center justify-center bg-black/5 hover:bg-black/10 rounded-full transition-all"><Plus className="w-6 h-6 rotate-45" /></button>
               </div>
 
               <div className="mb-6">
@@ -1264,10 +1266,10 @@ ${charPrompt}
       )}
 
       {showProjectModal && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/95 backdrop-blur-2xl p-6">
-           <div className={`w-full max-w-6xl h-[85vh] flex flex-col rounded-[3rem] p-10 lg:p-12 shadow-2xl relative overflow-hidden ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`}>
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm" onClick={() => setShowProjectModal(false)}>
+           <div className={`w-full max-w-6xl h-[85vh] flex flex-col rounded-[3rem] p-10 lg:p-12 shadow-2xl relative overflow-hidden ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`} onClick={(e) => e.stopPropagation()}>
               <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-sky-500 via-sky-300 to-sky-600" />
-              <button onClick={() => setShowProjectModal(false)} className="absolute top-8 right-8 p-3 bg-black/10 hover:bg-black/20 rounded-full transition-all z-10 text-current"><Plus className="w-8 h-8 rotate-45" /></button>
+              <button onClick={() => setShowProjectModal(false)} className="absolute top-6 right-6 w-12 h-12 flex items-center justify-center bg-black/5 hover:bg-black/10 rounded-full transition-all z-10 text-current"><Plus className="w-8 h-8 rotate-45" /></button>
               
               <div className="flex justify-between items-start mb-12">
                 <div>
