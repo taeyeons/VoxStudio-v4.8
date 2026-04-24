@@ -10,9 +10,10 @@ import {
   Loader2, Sparkles, Zap, Users, PlayCircle, CheckCircle2, 
   AlertCircle, Music4, BookOpen, Plus, LayoutGrid, ChevronRight, 
   Eye, EyeOff, Maximize2, Minimize2, Palette, Sun, Moon, Leaf,
-  FolderOpen, Save, FileJson, Share2, Clock, Check
+  FolderOpen, Save, FileJson, Share2, Clock, Check, GripVertical, 
+  Activity, Pencil
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence, Reorder } from "motion/react";
 
 // --- 初始化 AI ---
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -33,6 +34,7 @@ interface ScriptElement {
   speaker?: string;
   meta: string;
   content: string;
+  sourceParaIds?: number[];
 }
 
 interface Chapter {
@@ -85,6 +87,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [editingCharId, setEditingCharId] = useState<string | null>(null);
   const [editingSidebarChapterId, setEditingSidebarChapterId] = useState<string | null>(null);
+  const [editingElementId, setEditingElementId] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizing, setIsResizing] = useState(false);
 
@@ -116,15 +119,15 @@ export default function App() {
     };
   }, [isResizing]);
 
-  // --- 同步滚动逻辑 (基于元素索引的语义映射) ---
+  // --- 同步滚动逻辑 (基于智能提取的段落映射) ---
   const handleSourceScroll = () => {
     if (!syncScroll || !sourceScrollRef.current || !scriptScrollRef.current || isScrollingRef.current) return;
     isScrollingRef.current = true;
     
     const src = sourceScrollRef.current;
     const wb = scriptScrollRef.current;
-    const paras = Array.from(src.querySelectorAll('p'));
-    const cards = Array.from(wb.querySelectorAll('.script-card'));
+    const paras = Array.from(src.querySelectorAll('p')) as HTMLElement[];
+    const cards = Array.from(wb.querySelectorAll('.script-card')) as HTMLElement[];
 
     if (paras.length === 0 || cards.length === 0) {
       isScrollingRef.current = false;
@@ -147,9 +150,35 @@ export default function App() {
 
     paras.forEach((p, idx) => p.classList.toggle('active', idx === closestParaIdx));
 
-    // 2. 语义映射：计算原文段落进度，映射到右侧剧本卡片索引
-    const ratio = paras.length > 1 ? closestParaIdx / (paras.length - 1) : 0;
-    const targetCardIdx = Math.round(ratio * (cards.length - 1));
+    // 2. 利用 sourceParaIds 进行精准语义映射
+    let targetCardIdx = -1;
+    // 直接查找哪张卡片包含了这个段落 ID
+    for (let i = 0; i < currentChapter.parsedElements.length; i++) {
+        const el = currentChapter.parsedElements[i];
+        if (el.sourceParaIds && el.sourceParaIds.includes(closestParaIdx)) {
+            targetCardIdx = i;
+            break; 
+        }
+    }
+    
+    // 如果没找到直接包含的，找最近的映射关系
+    if (targetCardIdx === -1) {
+        let nearestCard = 0;
+        let minIdDiff = Infinity;
+        for (let i = 0; i < currentChapter.parsedElements.length; i++) {
+            const el = currentChapter.parsedElements[i];
+            if (el.sourceParaIds && el.sourceParaIds.length > 0) {
+                // 取平均或者第一个对应的段落
+                const centerParaId = el.sourceParaIds[0];
+                const d = Math.abs(centerParaId - closestParaIdx);
+                if (d < minIdDiff) {
+                   minIdDiff = d;
+                   nearestCard = i;
+                }
+            }
+        }
+        targetCardIdx = nearestCard;
+    }
 
     cards.forEach((c, idx) => c.classList.toggle('active-card', idx === targetCardIdx));
 
@@ -169,10 +198,10 @@ export default function App() {
 
     const wb = scriptScrollRef.current;
     const src = sourceScrollRef.current;
-    const paras = Array.from(src.querySelectorAll('p'));
-    const cards = Array.from(wb.querySelectorAll('.script-card'));
+    const paras = Array.from(src.querySelectorAll('p')) as HTMLElement[];
+    const cards = Array.from(wb.querySelectorAll('.script-card')) as HTMLElement[];
 
-    if (paras.length === 0 || cards.length === 0) {
+    if (paras.length === 0 || cards.length === 0 || !currentChapter.parsedElements.length) {
       isScrollingRef.current = false;
       return;
     }
@@ -193,9 +222,21 @@ export default function App() {
 
     cards.forEach((c, idx) => c.classList.toggle('active-card', idx === closestCardIdx));
 
-    // 2. 语义映射：计算剧本进度，映射回左侧原文对应的段落索引
-    const ratio = cards.length > 1 ? closestCardIdx / (cards.length - 1) : 0;
-    const targetParaIdx = Math.round(ratio * (paras.length - 1));
+    // 2. 使用该卡片的 sourceParaIds 精准定位左侧段落
+    const activeElement = currentChapter.parsedElements[closestCardIdx];
+    let targetParaIdx = 0;
+    
+    if (activeElement && activeElement.sourceParaIds && activeElement.sourceParaIds.length > 0) {
+        // 取映射中的第一个段落
+        targetParaIdx = activeElement.sourceParaIds[0];
+    } else {
+        // Fallback: 比例估算
+        const ratio = cards.length > 1 ? closestCardIdx / (cards.length - 1) : 0;
+        targetParaIdx = Math.round(ratio * (paras.length - 1));
+    }
+
+    // 防止越界
+    targetParaIdx = Math.max(0, Math.min(targetParaIdx, paras.length - 1));
 
     paras.forEach((p, idx) => p.classList.toggle('active', idx === targetParaIdx));
 
@@ -228,6 +269,37 @@ export default function App() {
   }, [savedProjects]);
 
   const currentChapter = chapters.find(c => c.id === currentChapterId) || chapters[0];
+
+  // --- 实时节奏分析 ---
+  const pacingData = useMemo(() => {
+    if (!currentChapter.parsedElements.length) return [];
+    return currentChapter.parsedElements.map((el, i) => ({
+      x: i,
+      y: el.type === 'sound_effect' ? 80 : el.type === 'dialogue' ? 50 : 20,
+      type: el.type
+    }));
+  }, [currentChapter.parsedElements]);
+
+  // --- 脚本修改逻辑 ---
+  const updateScriptElement = (elId: string, updates: Partial<ScriptElement>) => {
+    setChapters(prev => prev.map(ch => {
+      if (ch.id === currentChapterId) {
+        return {
+          ...ch,
+          parsedElements: ch.parsedElements.map(el => 
+            el.id === elId ? { ...el, ...updates } : el
+          )
+        };
+      }
+      return ch;
+    }));
+  };
+
+  const reorderScriptElements = (newElements: ScriptElement[]) => {
+    setChapters(prev => prev.map(ch => 
+      ch.id === currentChapterId ? { ...ch, parsedElements: newElements } : ch
+    ));
+  };
 
   // --- 主题配置 ---
   const themeConfig = {
@@ -374,17 +446,25 @@ export default function App() {
     const lines = text.split("\n").filter(l => l.trim() !== "");
     const elements: ScriptElement[] = [];
     lines.forEach((line, i) => {
-      const match = line.match(/^【(.*?)】[：: ]?(.*)$/);
+      // 容错处理：匹配形如 【旁白】[1,2]：（描述）内容 的格式
+      const match = line.match(/^【([^】]+)】(?:\s*\[([^\]]+)\]\s*)?[：: ]*(.*)$/);
       if (match) {
         const speaker = match[1].trim();
-        const fullContent = match[2].trim();
+        const paraIdsStr = match[2];
+        const fullContent = match[3].trim();
+        
+        let sourceParaIds: number[] = [];
+        if (paraIdsStr) {
+           sourceParaIds = paraIdsStr.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+        }
+
         const metaMatch = fullContent.match(/\((.*?)\)|（(.*?)）/);
         const meta = metaMatch ? (metaMatch[1] || metaMatch[2]) : "自然";
         const content = fullContent.replace(/\(.*?\)|（.*?）/, "").trim();
         let type: "narration" | "dialogue" | "sound_effect" = "dialogue";
         if (speaker === "旁白") type = "narration";
         if (speaker.includes("场景音") || speaker.includes("环境音") || speaker.includes("音效")) type = "sound_effect";
-        elements.push({ id: `el-${Date.now()}-${i}`, type, meta, content, speaker: type === "dialogue" ? speaker : undefined });
+        elements.push({ id: `el-${Date.now()}-${i}`, type, meta, content, speaker: type === "dialogue" ? speaker : undefined, sourceParaIds });
       }
     });
     return elements;
@@ -396,10 +476,35 @@ export default function App() {
     setError(null);
     try {
       const charPrompt = characters.map(c => `- ${c.name}：${c.gender}/${c.age}，${c.tone}。${c.description}`).join("\n");
-      const systemInstruction = `你是有声书改编专家。风格：${prodStyle}。基准语速：${readingSpeed} WPM。\n全局人设表：\n${charPrompt}\n任务：将小说对白与环境描写转化为有声书剧本。\n严格格式：\n【旁白】：（情感指令）内容\n【角色名】：（情感指令）内容\n【场景音】：（音效描述）\n要求：保留原文完整情节，增强对话张力，直接输出剧本，不要任何 Markdown 标记。`;
+      const systemInstruction = `你是有声书改编专家。风格：${prodStyle}。
+全局人设配置：
+${charPrompt}
+
+【核心任务】
+将给定的带有段落编号小说原文，转化为适合多人/双播/单播的有声书剧本。
+
+【极为重要的红线规则】
+必须 100% 保留原文所有的情节、景物描写、心理描写、动作描写以及对话！每一行原文内容都必须无损转化为剧本内容，一字不差或在保证信息量绝不减少的前提下润色。
+绝对禁止删减原文内容！绝对禁止将大量描写总结概括成一两句话！如果你对原文进行了删减、提炼或剧情跳过，将会直接导致工作失败。
+
+【输出格式控制】
+必须且只使用以下三种前缀格式（不要任何多余的 Markdown 标记如粗体或代码块），且每个条目必须附带其对应的[原段落编号]（可以多个编号用逗号隔开），格式如下：
+
+【旁白】[0,1]：（情感氛围/语气/节奏指令）负责环境描写、动作描写、时间流逝等原文中非开口说话的外在维度的客观描述。
+【具体的角色名字】[2]：（语气/神态动作/内心活动）负责角色的台词/对白，以及该角色的【内心独白】！绝对不要真的输出“角色名”三个字，必须填写真实的名字！心理活动一律视为该角色自己的对白演绎！如果原文有角色心理活动（如：他心想.../他暗自琢磨...），角色名就是该角色，不要写【旁白】！
+【场景音】[3]：（详细的物理环境音效，用以辅助听觉氛围营造）
+
+【执行规范】
+1. 角色台词剥离：逢“某某说：‘你好’”等句式，将“你好”划分为角色对白，将“某某说”通过角色的语气括号备注体现（动作交由旁白）。
+2. 内心活动归属：凡是“XX心想”、“XX暗道”这类内心独白，全部抽离出作为该【具体的角色名字】的对播台词，括号标注（内心独白/心里想）。
+3. 切分节奏：遇到长篇大论的旁白原文，必须将其拆分为多条短【旁白】和【场景音】。
+4. 字句保留：剧本的文本量必须基本等于甚至略大于源小说的文本量，不可以偷工减料。`;
+      
+      const numberedText = currentChapter.novelText.split("\n").filter(p => p.trim()).map((p, i) => `[${i}] ${p}`).join("\n");
+
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: [{ role: "user", parts: [{ text: currentChapter.novelText }] }],
+        contents: [{ role: "user", parts: [{ text: numberedText }] }],
         config: { systemInstruction, temperature: 0.7 }
       });
       const scriptText = response.text;
@@ -704,44 +809,70 @@ export default function App() {
                     <div className={`flex-1 flex flex-col border ${theme === 'light' ? 'border-sky-200 shadow-sky-100/30' : 'border-sky-500/20 shadow-sky-950/20'} rounded-[3rem] ${theme === 'light' ? 'bg-white shadow-2xl' : 'bg-slate-900/10 shadow-2xl'} overflow-hidden relative`}>
                        <div className={`px-10 py-5 border-b ${theme === 'light' ? 'border-sky-50 bg-sky-50/30' : 'border-sky-500/10 bg-sky-950/30'} flex justify-between items-center shrink-0`}>
                           <div className="flex items-center gap-6">
-                             {!showSource && <button onClick={() => setShowSource(true)} className="p-3 bg-sky-500/10 text-sky-500 rounded-2xl hover:bg-sky-500/20 transition-all shadow-lg active:scale-95"><Eye className="w-5 h-5" /></button>}
-                             <div className="flex flex-col">
-                               <span className={`text-[10px] font-black ${theme === 'light' ? 'text-sky-700' : 'text-sky-400'} uppercase tracking-[0.5em] italic`}>Production workbench</span>
-                               {showSource && (
-                                 <button onClick={() => setSyncScroll(!syncScroll)} className={`mt-1 flex items-center gap-2 group`}>
-                                   <div className={`w-6 h-3 rounded-full transition-all relative ${syncScroll ? 'bg-sky-500' : 'bg-slate-300'}`}>
-                                     <div className={`absolute top-0.5 w-2 h-2 rounded-full bg-white transition-all ${syncScroll ? 'left-3.5' : 'left-0.5'}`} />
-                                   </div>
-                                   <span className={`text-[8px] font-black uppercase tracking-widest ${syncScroll ? 'text-sky-500' : 'opacity-30'}`}>Sync Scroll {syncScroll ? 'On' : 'Off'}</span>
-                                 </button>
-                               )}
+                             <div className="flex items-center gap-3">
+                                <span className="text-[10px] font-black italic opacity-40 uppercase tracking-[0.3em]">Production Workbench</span>
+                                <div className="flex items-center gap-2 px-3 py-1 bg-sky-500/10 rounded-full border border-sky-500/20">
+                                   <input type="checkbox" checked={syncScroll} onChange={() => setSyncScroll(!syncScroll)} className="w-3 h-3 rounded bg-sky-500 cursor-pointer" />
+                                   <span className="text-[8px] font-black text-sky-500 uppercase tracking-widest ml-1 cursor-pointer">Sync Scroll {syncScroll ? 'On' : 'Off'}</span>
+                                </div>
                              </div>
                           </div>
-                          <div className="flex items-center gap-4"><span className="text-[9px] font-mono opacity-30 font-black">CHAPTER NODES: {currentChapter.parsedElements.length}</span></div>
+                          <div className="flex items-center gap-4">
+                             <span className="text-[9px] font-black opacity-30 uppercase tracking-[0.2em]">Chapter Nodes: {currentChapter.parsedElements.length}</span>
+                          </div>
                        </div>
-                       <div 
+                       <Reorder.Group 
+                        axis="y"
+                        values={currentChapter.parsedElements}
+                        onReorder={reorderScriptElements}
                         ref={scriptScrollRef}
                         onScroll={handleScriptScroll}
-                        className="flex-1 p-10 overflow-y-auto space-y-8 scrollbar-hide pb-24"
+                        className="flex-1 p-10 overflow-y-auto space-y-3 scrollbar-hide pb-24"
                        >
                           {currentChapter.parsedElements.map((el) => (
-                            <div key={el.id} className={`script-card p-10 rounded-[3rem] border transition-all duration-500 group relative overflow-hidden ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50 border-amber-200 shadow-sm' : 'bg-amber-500/10 border-amber-500/30 ring-8 ring-amber-500/5') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-white/[0.04] border-white/5')} ${syncScroll ? '[&.active-card]:ring-4 [&.active-card]:ring-sky-500/40 [&.active-card]:border-sky-400 [&.active-card]:scale-[1.02] [&.active-card]:shadow-2xl [&.active-card]:opacity-100 opacity-40 hover:opacity-100' : 'opacity-100'}`}>
-                               <div className="absolute left-0 top-0 bottom-0 w-2.5 bg-sky-500 opacity-0 group-[.active-card]:opacity-100 transition-opacity duration-500" />
-                               <div className="flex items-center gap-5 mb-6 relative">
-                                  <span className={`text-[10px] font-black px-5 py-2 rounded-full shadow-lg tracking-[0.2em] uppercase ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-black' : 'bg-pink-600 text-white'}`}>{el.type === 'dialogue' ? el.speaker : el.type === 'narration' ? '旁白' : '场景音效'}</span>
-                                  <span className={`text-xs italic font-mono font-black opacity-30 ${theme === 'light' ? 'text-slate-900' : 'text-slate-400'} lowercase`}>{">"} {el.meta}</span>
+                            <Reorder.Item 
+                              key={el.id} 
+                              value={el}
+                              className={`script-card group relative overflow-hidden transition-all duration-500 rounded-3xl border ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50/50 border-amber-200' : 'bg-amber-500/5 border-amber-500/20') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-white/[0.02] border-white/5')} ${syncScroll ? '[&.active-card]:ring-2 [&.active-card]:ring-sky-500/40 [&.active-card]:border-sky-400 [&.active-card]:scale-[1.01] [&.active-card]:shadow-xl [&.active-card]:opacity-100 opacity-40 hover:opacity-100' : 'opacity-100'}`}
+                            >
+                               <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-sky-500 opacity-0 group-[.active-card]:opacity-100 transition-opacity duration-500" />
+                               
+                               <div className="p-8">
+                                  <div className="flex items-center justify-between mb-4">
+                                     <div className="flex items-center gap-4">
+                                        <div className={`p-1.5 rounded-lg ${theme === 'light' ? 'bg-slate-100' : 'bg-white/5'} opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing`}>
+                                           <GripVertical className="w-3.5 h-3.5 opacity-30" />
+                                        </div>
+                                        <span className={`text-[9px] font-black px-4 py-1.5 rounded-full shadow-sm tracking-[0.1em] uppercase ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-black' : 'bg-pink-600 text-white'}`}>{el.type === 'dialogue' ? el.speaker : el.type === 'narration' ? '旁白' : '音效'}</span>
+                                        <span className={`text-[10px] font-mono opacity-20 font-black uppercase tracking-tighter`}>// {el.meta}</span>
+                                     </div>
+                                     <button onClick={() => setEditingElementId(editingElementId === el.id ? null : el.id)} className={`p-2 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100' : 'hover:bg-white/10'} opacity-0 group-hover:opacity-100`}>
+                                        <Pencil className={`w-3.5 h-3.5 ${editingElementId === el.id ? 'text-sky-500' : 'opacity-30'}`} />
+                                     </button>
+                                  </div>
+
+                                  {editingElementId === el.id ? (
+                                    <textarea 
+                                      autoFocus
+                                      value={el.content}
+                                      onChange={(e) => updateScriptElement(el.id, { content: e.target.value })}
+                                      onBlur={() => setEditingElementId(null)}
+                                      className={`w-full bg-transparent border-none focus:ring-0 p-0 text-lg leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-white'} resize-none font-medium h-auto min-h-[100px]`}
+                                    />
+                                  ) : (
+                                    <p onClick={() => setEditingElementId(el.id)} className={`cursor-text ${el.type === 'dialogue' ? `text-lg font-medium leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-slate-100'}` : el.type === 'sound_effect' ? `text-base italic font-black ${theme === 'light' ? 'text-amber-700' : 'text-amber-400'}` : `text-lg font-medium leading-relaxed opacity-60 italic ${theme === 'light' ? 'text-slate-800' : 'text-slate-300'}`}`}>{el.content}</p>
+                                  )}
                                </div>
-                               <p className={`${el.type === 'dialogue' ? `text-lg font-black leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-slate-100'}` : el.type === 'sound_effect' ? `text-base italic font-black ${theme === 'light' ? 'text-amber-700' : 'text-amber-400'}` : `text-lg font-bold leading-relaxed opacity-60 italic ${theme === 'light' ? 'text-slate-800' : 'text-slate-300'}`}`}>{el.content}</p>
-                            </div>
+                            </Reorder.Item>
                           ))}
-                          {currentChapter.parsedElements.length === 0 && (
-                            <div className="h-full flex flex-col items-center justify-center gap-8 opacity-[0.03] grayscale mt-20">
-                               <PlayCircle className="w-48 h-48 stroke-[1px]" /><p className="text-xl font-black uppercase tracking-[1.5em] leading-none ml-[1.5em] text-current">Ready</p>
-                            </div>
-                          )}
+                        </Reorder.Group>
+                        {currentChapter.parsedElements.length === 0 && (
+                          <div className="h-full flex flex-col items-center justify-center gap-8 opacity-[0.03] grayscale mt-20">
+                             <PlayCircle className="w-48 h-48 stroke-[1px]" /><p className="text-xl font-black uppercase tracking-[1.5em] leading-none ml-[1.5em] text-current">Ready</p>
+                          </div>
+                        )}
                        </div>
                     </div>
-                 </div>
               </motion.div>
             )}
           </AnimatePresence>
