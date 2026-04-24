@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { set as idbSet, get as idbGet } from 'idb-keyval';
+import * as XLSX from 'xlsx';
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { 
@@ -36,7 +38,7 @@ const getAiClient = () => {
   return new GoogleGenAI(config);
 };
 
-const generateAiContent = async (options: { model: string, prompt: string, systemInstruction?: string, jsonMode?: boolean }) => {
+const generateAiContent = async (options: { model: string, prompt: string, systemInstruction?: string, jsonMode?: boolean, onChunk?: (text: string) => void }) => {
   const format = localStorage.getItem('vox_api_format') || 'gemini';
   const customKey = localStorage.getItem('vox_api_key') || undefined;
   const customUrl = localStorage.getItem('vox_base_url') || undefined;
@@ -59,25 +61,56 @@ const generateAiContent = async (options: { model: string, prompt: string, syste
     }
     messages.push({ role: 'user', content: options.prompt });
 
-    const completion = await openai.chat.completions.create({
-      model: options.model,
-      messages,
-      response_format: options.jsonMode ? { type: "json_object" } : undefined,
-      temperature: options.jsonMode ? 0.1 : 0.7,
-    });
-
-    return completion.choices[0].message.content;
+    if (options.onChunk && !options.jsonMode) {
+      const stream = await openai.chat.completions.create({
+        model: options.model,
+        messages,
+        temperature: 0.7,
+        stream: true,
+      });
+      let fullContent = "";
+      for await (const chunk of stream) {
+        const char = chunk.choices[0]?.delta?.content || "";
+        fullContent += char;
+        options.onChunk(fullContent);
+      }
+      return fullContent;
+    } else {
+      const completion = await openai.chat.completions.create({
+        model: options.model,
+        messages,
+        response_format: options.jsonMode ? { type: "json_object" } : undefined,
+        temperature: options.jsonMode ? 0.1 : 0.7,
+      });
+      return completion.choices[0].message.content;
+    }
   } else {
-    const response = await getAiClient().models.generateContent({
-      model: options.model,
-      contents: [{ role: "user", parts: [{ text: options.prompt }] }],
-      config: { 
+    const aiConfig: any = { 
         systemInstruction: options.systemInstruction, 
         temperature: options.jsonMode ? 0.1 : 0.7,
         responseMimeType: options.jsonMode ? "application/json" : undefined 
+    };
+    
+    if (options.onChunk && !options.jsonMode) {
+      const stream = await getAiClient().models.generateContentStream({
+        model: options.model,
+        contents: [{ role: "user", parts: [{ text: options.prompt }] }],
+        config: aiConfig
+      });
+      let fullContent = "";
+      for await (const chunk of stream) {
+        fullContent += chunk.text;
+        options.onChunk(fullContent);
       }
-    });
-    return response.text;
+      return fullContent;
+    } else {
+      const response = await getAiClient().models.generateContent({
+        model: options.model,
+        contents: [{ role: "user", parts: [{ text: options.prompt }] }],
+        config: aiConfig
+      });
+      return response.text;
+    }
   }
 };
 
@@ -106,6 +139,7 @@ interface Chapter {
   novelText: string;
   scriptText: string;
   parsedElements: ScriptElement[];
+  notes?: string;
 }
 
 interface Project {
@@ -135,6 +169,7 @@ export default function App() {
   ]);
   const [prodStyle, setProdStyle] = useState<ProductionStyle>("都市言情");
   const [readingSpeed, setReadingSpeed] = useState(250);
+  const [isZenMode, setIsZenMode] = useState(false);
   const [theme, setTheme] = useState<Theme>("light");
 
   // --- 项目库管理状态 ---
@@ -372,20 +407,38 @@ export default function App() {
 
   // --- 初始化加载 ---
   useEffect(() => {
-    const stored = localStorage.getItem("vox_studio_projects");
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored) as Project[];
-        setSavedProjects(parsed);
-      } catch (e) {
-        console.error("加载项目库失败", e);
+    idbGet("vox_studio_projects").then(stored => {
+      if (stored) {
+        if (typeof stored === 'string') {
+          // Fallback legacy localstorage string
+          try {
+            const parsed = JSON.parse(stored) as Project[];
+            setSavedProjects(parsed);
+          } catch (e) {
+            console.error("加载项目库失败", e);
+          }
+        } else if (Array.isArray(stored)) {
+          setSavedProjects(stored);
+        }
+      } else {
+        // Fallback check localStorage just in case
+        const lsStored = localStorage.getItem("vox_studio_projects");
+        if (lsStored) {
+          try {
+            const lsParsed = JSON.parse(lsStored);
+            setSavedProjects(lsParsed);
+            // Migrate
+            idbSet("vox_studio_projects", lsParsed);
+            localStorage.removeItem("vox_studio_projects");
+          } catch (e) { console.error(e); }
+        }
       }
-    }
+    });
   }, []);
 
-  // --- 自动保存至 localStorage ---
+  // --- 自动保存至 IndexedDB ---
   useEffect(() => {
-    localStorage.setItem("vox_studio_projects", JSON.stringify(savedProjects));
+    idbSet("vox_studio_projects", savedProjects);
   }, [savedProjects]);
 
   const currentChapter = chapters.find(c => c.id === currentChapterId) || chapters[0];
@@ -413,6 +466,28 @@ export default function App() {
       }
       return ch;
     }));
+  };
+
+  const handlePlayAudio = (el: ScriptElement) => {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const textToRead = el.content || el.meta || "";
+    if (!textToRead.trim()) return;
+    const utterance = new SpeechSynthesisUtterance(textToRead);
+    
+    // Attempt to match tone/pitch roughly
+    if (el.type === 'narration') {
+      utterance.pitch = 0.9;
+      utterance.rate = 1.0;
+    } else if (el.type === 'dialogue') {
+      const char = characters.find(c => c.name === el.speaker);
+      if (char) {
+         if (char.gender === '男') { utterance.pitch = 0.8; }
+         if (char.gender === '女') { utterance.pitch = 1.2; }
+      }
+      utterance.rate = 1.1;
+    }
+    window.speechSynthesis.speak(utterance);
   };
 
   const reorderScriptElements = (newElements: ScriptElement[]) => {
@@ -443,7 +518,7 @@ export default function App() {
   const currentTheme = themeConfig[theme];
 
   // --- 项目管理逻辑 ---
-  const saveCurrentProject = () => {
+  const saveCurrentProject = useCallback(() => {
     const currentProject: Project = {
       id: projectId,
       name: projectName,
@@ -465,7 +540,18 @@ export default function App() {
 
     setShowSaveToast(true);
     setTimeout(() => setShowSaveToast(false), 2000);
-  };
+  }, [projectId, projectName, chapters, characters, prodStyle, readingSpeed, theme]);
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        saveCurrentProject();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [saveCurrentProject]);
 
   const loadProject = (project: Project) => {
     setProjectId(project.id);
@@ -599,9 +685,11 @@ export default function App() {
     setError(null);
     try {
       const charPrompt = characters.map(c => `- ${c.name}：${c.gender}/${c.age}，${c.tone}。${c.description}`).join("\n");
+      // If there are director's notes
+      const notes = currentChapter.notes ? `\n【本章导演备注】\n${currentChapter.notes}\n` : "";
       const systemInstruction = `你是有声书改编专家。风格：${prodStyle}。
 全局人设配置：
-${charPrompt}
+${charPrompt}${notes}
 
 【核心任务】
 将给定的带有段落编号小说原文，转化为适合多人/双播/单播的有声书剧本。
@@ -626,11 +714,19 @@ ${charPrompt}
       
       const numberedText = currentChapter.novelText.split("\n").filter(p => p.trim()).map((p, i) => `[${i}] ${p}`).join("\n");
 
+      let lastUpdateTime = Date.now();
+      
       const responseText = await generateAiContent({
         model: localStorage.getItem('vox_custom_model') || selectedModel,
         prompt: numberedText,
         systemInstruction: systemInstruction,
-        jsonMode: false
+        jsonMode: false,
+        onChunk: (chunkText) => {
+          if (Date.now() - lastUpdateTime > 200) {
+            updateChapterData({ scriptText: chunkText, parsedElements: parseScript(chunkText) });
+            lastUpdateTime = Date.now();
+          }
+        }
       });
       const scriptText = responseText;
       if (!scriptText) throw new Error("AI 返回内容为空");
@@ -669,14 +765,16 @@ ${charPrompt}
   };
 
   const [showExportModal, setShowExportModal] = useState(false);
-  const [exportFormat, setExportFormat] = useState<'txt' | 'markdown' | 'word'>('txt');
+  const [exportFormat, setExportFormat] = useState<'txt' | 'markdown' | 'word' | 'excel'>('txt');
   const [exportScope, setExportScope] = useState<'single' | 'all'>('single');
 
-  const generateChapterExport = (chap: Chapter, format: 'txt' | 'markdown' | 'word'): string => {
+  const generateChapterExport = (chap: Chapter, format: 'txt' | 'markdown' | 'word' | 'excel'): string => {
     if (!chap.parsedElements || chap.parsedElements.length === 0) {
       // Fallback for unparsed but generated raw script, although removing markers requires regex here
       return chap.scriptText.replace(/\[[0-9,\s]+\]/g, "");
     }
+
+    if (format === 'excel') return ""; // Excel is handled separately
 
     if (format === 'txt') {
       return chap.parsedElements.map(el => {
@@ -710,6 +808,62 @@ ${charPrompt}
   };
 
   const executeExport = () => {
+    if (exportFormat === 'excel') {
+      const exportData: any[][] = [];
+      const headers = ["序号", "角色名", "提示/语气", "台词内容", "字数"];
+      exportData.push(headers);
+
+      const addChapterToExcel = (chap: Chapter) => {
+        exportData.push([`>>> ${chap.title}`, "", "", "", ""]);
+        chap.parsedElements.forEach((el, index) => {
+          let role = "旁白";
+          let tone = el.meta || "";
+          
+          if (el.type === 'dialogue') {
+            role = el.speaker || "未知角色";
+          } else if (el.type === 'sound_effect') {
+             role = "【音效】";
+             tone = "";
+          }
+
+          exportData.push([
+            index + 1,
+            role,
+            tone,
+            el.content,
+            el.content.length
+          ]);
+        });
+      };
+
+      if (exportScope === 'single') {
+        if (!currentChapter.scriptText) { setError("当前章节没有可导出的剧本"); return; }
+        addChapterToExcel(currentChapter);
+      } else {
+        const generatedChapters = chapters.filter(c => c.scriptText.trim() !== "");
+        if (generatedChapters.length === 0) { setError("没有可导出的已生成剧本"); return; }
+        generatedChapters.forEach(addChapterToExcel);
+      }
+
+      const ws = XLSX.utils.aoa_to_sheet(exportData);
+      
+      // Simple column widths
+      ws['!cols'] = [
+        { wch: 10 }, // 序号
+        { wch: 20 }, // 角色名
+        { wch: 30 }, // 提示/语气
+        { wch: 100 }, // 台词内容
+        { wch: 10 }  // 字数
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "剧本");
+      const fileName = `${projectName}_${exportScope === 'single' ? currentChapter.title : '全本共享'}.xlsx`;
+      XLSX.writeFile(wb, fileName);
+      setShowExportModal(false);
+      return;
+    }
+
     let finalContent = "";
     let mimeType = "text/plain";
     let extension = "txt";
@@ -785,19 +939,19 @@ ${charPrompt}
   return (
     <div className={`h-screen flex flex-col ${currentTheme.bg} ${currentTheme.text} font-sans overflow-hidden transition-colors duration-500`}>
       {/* 顶部导航 */}
-      <nav className={`h-16 flex items-center justify-between px-6 ${currentTheme.nav} border-b ${currentTheme.border} backdrop-blur-xl z-[100] shrink-0`}>
+      {!isZenMode && <nav className={`h-16 flex items-center justify-between px-6 ${currentTheme.nav} border-b ${currentTheme.border} backdrop-blur-xl z-[100] shrink-0`}>
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-3">
             <div className={`w-10 h-10 ${currentTheme.btn} rounded-xl flex items-center justify-center shadow-lg text-white`}><Mic className="w-5 h-5" /></div>
             <div>
               <h1 className="text-xs font-black tracking-widest uppercase opacity-90">VoxStudio v4.8</h1>
-              <p className="text-[8px] opacity-40 font-mono tracking-tighter italic">PROFESSIONAL WORKFLOW</p>
+              <p className="text-[10px] opacity-40 font-mono tracking-tighter italic">PROFESSIONAL WORKFLOW</p>
             </div>
           </div>
           <div className={`h-8 w-px ${currentTheme.border}`} />
           <div className="flex items-center gap-4">
             <div className="flex flex-col">
-              <span className="text-[9px] font-black opacity-30 uppercase mb-0.5 tracking-tighter">Project / 剧本总称</span>
+              <span className="text-[11px] font-black opacity-30 uppercase mb-0.5 tracking-tighter">Project / 剧本总称</span>
               <input className="bg-transparent border-none outline-none text-sm font-black focus:text-sky-400 transition-colors w-44" value={projectName} onChange={e => setProjectName(e.target.value)} />
             </div>
             <div className="flex gap-1">
@@ -834,22 +988,22 @@ ${charPrompt}
             <button onClick={() => setShowExportModal(true)} className="px-5 py-2.5 bg-white text-slate-950 rounded-xl text-xs font-black shadow-lg flex items-center gap-2 hover:bg-sky-50 transition-all active:scale-95 text-nowrap"><Download className="w-4 h-4 text-sky-500" /> 导出剧作 / Export</button>
           </div>
         </div>
-      </nav>
+      </nav>}
 
       <main className="flex-1 flex overflow-hidden">
-        <aside 
+        {!isZenMode && <aside 
           style={{ width: sidebarWidth }}
           className={`border-r ${currentTheme.border} ${currentTheme.sidebar} flex flex-col shrink-0 transition-all duration-75 relative`}
         >
           <div className={`p-5 flex justify-between items-center ${theme === 'light' ? 'bg-slate-200/50' : 'bg-slate-950/20'} border-b ${currentTheme.border}`}>
-            <span className="text-[10px] font-black opacity-30 uppercase tracking-widest">Directory / 章节</span>
+            <span className="text-xs font-black opacity-30 uppercase tracking-widest">Directory / 章节</span>
             <button onClick={() => { const id = `ch-${Date.now()}`; setChapters([...chapters, { id, title: "新章节文本", novelText: "", scriptText: "", parsedElements: [] }]); setCurrentChapterId(id); }} className="p-1.5 text-sky-500 hover:bg-sky-500/10 rounded-lg transition-all"><Plus className="w-4 h-4" /></button>
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-1.5 scrollbar-hide">
             {chapters.map((ch, idx) => (
               <div key={ch.id} onClick={() => setCurrentChapterId(ch.id)} className={`group relative p-4 rounded-2xl cursor-pointer border transition-all ${currentChapterId === ch.id ? (theme === 'light' ? 'bg-sky-500 text-white border-sky-600/20 shadow-lg' : 'bg-sky-600/10 border-sky-500/40 text-sky-400') : `border-transparent opacity-60 hover:opacity-100 ${theme === 'light' ? 'hover:bg-slate-200' : 'hover:bg-slate-900/50'}`}`}>
                 <div className="flex flex-col gap-1 pr-14">
-                  <div className={`text-[8px] font-mono opacity-40 ${currentChapterId === ch.id && theme === 'light' ? 'text-white' : ''}`}>CH-{(idx+1).toString().padStart(2,'0')}</div>
+                  <div className={`text-[10px] font-mono opacity-40 ${currentChapterId === ch.id && theme === 'light' ? 'text-white' : ''}`}>CH-{(idx+1).toString().padStart(2,'0')}</div>
                   {editingSidebarChapterId === ch.id ? (
                     <input 
                       autoFocus
@@ -873,8 +1027,8 @@ ${charPrompt}
             ))}
           </div>
           <div className={`mt-auto p-6 ${theme === 'light' ? 'bg-slate-100' : 'bg-slate-950/40'} border-t ${currentTheme.border} space-y-4`}>
-             <div className="flex justify-between items-center"><span className="text-[9px] font-black opacity-40 uppercase">Global Words</span><span className={`text-xs font-mono font-black ${currentTheme.accent}`}>{totalNovelWords.toLocaleString()}</span></div>
-             <div className="flex justify-between items-center"><span className="text-[9px] font-black opacity-40 uppercase">Est. Runtime</span><span className={`text-xs font-mono font-black ${currentTheme.accent}`}>{totalScriptDuration.toFixed(1)} MIN</span></div>
+             <div className="flex justify-between items-center"><span className="text-[11px] font-black opacity-40 uppercase">Global Words</span><span className={`text-xs font-mono font-black ${currentTheme.accent}`}>{totalNovelWords.toLocaleString()}</span></div>
+             <div className="flex justify-between items-center"><span className="text-[11px] font-black opacity-40 uppercase">Est. Runtime</span><span className={`text-xs font-mono font-black ${currentTheme.accent}`}>{totalScriptDuration.toFixed(1)} MIN</span></div>
           </div>
           {/* Resize Handle */}
           <div 
@@ -883,24 +1037,27 @@ ${charPrompt}
           >
             <div className="h-full w-full opacity-0 group-hover:opacity-100 bg-sky-500/20" />
           </div>
-        </aside>
+        </aside>}
 
         <div className="flex-1 flex overflow-hidden relative">
           <AnimatePresence mode="wait">
+            {syncScroll && (
+              <div className="absolute top-1/2 left-0 w-full h-[1px] bg-sky-500/20 pointer-events-none z-[50]" />
+            )}
             {activeTab === "book" && (
               <motion.div key="book" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex flex-col p-5 gap-5 overflow-hidden w-full">
                 <div className="flex justify-between items-end shrink-0 px-6">
                   <div className="max-w-xl">
                     <h2 className="text-xl font-black italic tracking-tighter">Asset Management / 资源管控</h2>
-                    <p className="text-[9px] opacity-40 mt-0.5 uppercase tracking-[0.2em] font-black leading-none">Global workspace for content processing</p>
+                    <p className="text-[11px] opacity-40 mt-0.5 uppercase tracking-[0.2em] font-black leading-none">Global workspace for content processing</p>
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => {
                         const input = document.createElement("input"); input.type = "file"; input.accept = ".txt";
                         input.onchange = (e: any) => { const r = new FileReader(); r.onload = (ev) => handleSplitImport(ev.target?.result as string); r.readAsText(e.target.files[0]); };
                         input.click();
-                    }} className={`px-4 py-2 ${theme === 'light' ? 'bg-white border-slate-200' : 'bg-slate-900 border-white/10'} border rounded-xl text-[9px] font-black flex items-center gap-2 hover:border-sky-500 transition-all`}><Upload className="w-3 h-3" /> 批量导入</button>
-                    <button onClick={extractCharacters} disabled={isProcessing || !currentChapter.novelText} className={`px-4 py-2 ${currentTheme.btn} rounded-xl text-[9px] font-black text-white flex items-center gap-2 shadow-lg hover:brightness-110 active:scale-95 transition-all`}>
+                    }} className={`px-4 py-2 ${theme === 'light' ? 'bg-white border-slate-200' : 'bg-slate-900 border-white/10'} border rounded-xl text-[11px] font-black flex items-center gap-2 hover:border-sky-500 transition-all`}><Upload className="w-3 h-3" /> 批量导入</button>
+                    <button onClick={extractCharacters} disabled={isProcessing || !currentChapter.novelText} className={`px-4 py-2 ${currentTheme.btn} rounded-xl text-[11px] font-black text-white flex items-center gap-2 shadow-lg hover:brightness-110 active:scale-95 transition-all`}>
                        {isProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Sparkles className="w-3 h-3" /> 人物建模全栈扫描</>}
                     </button>
                   </div>
@@ -918,26 +1075,30 @@ ${charPrompt}
                           else updateChapterData({ novelText: text });
                       }} />
                       <div className={`mt-3 pt-3 border-t ${currentTheme.border} flex justify-between items-center opacity-20`}>
-                        <div className="flex items-center gap-6"><span className="text-[8px] font-mono font-black italic">NODE:READY</span><span className="text-[8px] font-mono font-black italic">UTF-8</span></div>
-                        <div className="flex items-center gap-6"><span className="text-[8px] font-mono font-black italic">CHARS: {currentChapter.novelText.length}</span></div>
+                        <div className="flex items-center gap-6"><span className="text-[10px] font-mono font-black italic">NODE:READY</span><span className="text-[10px] font-mono font-black italic">UTF-8</span></div>
+                        <div className="flex items-center gap-6"><span className="text-[10px] font-mono font-black italic">CHARS: {currentChapter.novelText.length}</span></div>
+                      </div>
+                      <div className={`mt-4 pt-4 border-t ${currentTheme.border}`}>
+                         <h4 className="text-xs font-black uppercase tracking-widest opacity-40 mb-2 flex items-center gap-2"><Sparkles className="w-3 h-3" /> Director's Notes / 导演备注</h4>
+                         <textarea className={`w-full bg-transparent resize-none border-none outline-none text-sm font-medium leading-relaxed scrollbar-hide ${theme === 'light' ? 'text-slate-800' : 'text-slate-200'} placeholder:opacity-30`} placeholder="输入特定的导演要求，例如：此段氛围压抑，男主多些疲惫感..." rows={2} value={currentChapter.notes || ""} onChange={e => updateChapterData({ notes: e.target.value })} />
                       </div>
                    </div>
 
                    <div className="w-72 flex flex-col gap-6 shrink-0 h-full">
                       <div className={`flex-1 ${theme === 'light' ? 'bg-slate-50 border-slate-100' : 'bg-black/20 border-white/5'} border rounded-[2.5rem] p-8 flex flex-col shadow-inner overflow-hidden shrink-0`}>
-                         <h3 className="text-[9px] font-black opacity-50 uppercase tracking-[0.4em] mb-8 italic">Intelligence / 章节情报</h3>
+                         <h3 className="text-[11px] font-black opacity-50 uppercase tracking-[0.4em] mb-8 italic">Intelligence / 章节情报</h3>
                          <div className="space-y-6 flex-1 overflow-y-auto scrollbar-hide">
                             <div className={`p-6 rounded-2xl ${theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-black/20 border-white/5'} border transition-all hover:scale-[1.02]`}>
-                               <span className="text-[8px] font-black opacity-50 uppercase block mb-2 italic tracking-widest leading-none">Density Analysis</span>
-                               <div className="text-2xl font-black italic tracking-tighter">{(currentChapter.novelText.length / 50).toFixed(1)} <span className="text-[10px] opacity-50 uppercase tracking-widest">Pages</span></div>
+                               <span className="text-[10px] font-black opacity-50 uppercase block mb-2 italic tracking-widest leading-none">Density Analysis</span>
+                               <div className="text-2xl font-black italic tracking-tighter">{(currentChapter.novelText.length / 50).toFixed(1)} <span className="text-xs opacity-50 uppercase tracking-widest">Pages</span></div>
                             </div>
                             <div className={`p-6 rounded-2xl ${theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : 'bg-black/20 border-white/5'} border transition-all hover:scale-[1.02]`}>
-                               <span className="text-[8px] font-black opacity-50 uppercase block mb-2 italic tracking-widest leading-none">Semantic Marker</span>
+                               <span className="text-[10px] font-black opacity-50 uppercase block mb-2 italic tracking-widest leading-none">Semantic Marker</span>
                                <div className={`text-2xl font-black italic tracking-tighter ${currentTheme.accent}`}>{currentChapter.novelText.length > 5000 ? "Epic Scale" : "Fast Pace"}</div>
                             </div>
                          </div>
                          <div className={`mt-8 p-6 rounded-[2rem] ${theme === 'light' ? 'bg-sky-600 text-white shadow-lg' : 'bg-sky-500/10 text-sky-400'} shadow-2xl shrink-0`}>
-                            <p className="text-[9px] font-black uppercase mb-2 tracking-widest leading-none">Workflow Insight</p>
+                            <p className="text-[11px] font-black uppercase mb-2 tracking-widest leading-none">Workflow Insight</p>
                             <p className="text-[11px] font-bold leading-relaxed opacity-90 italic">系统侦测到文本具备索引结构。点击扫描以建立角色依赖树。</p>
                          </div>
                       </div>
@@ -952,9 +1113,9 @@ ${charPrompt}
                     <h2 className="text-2xl font-black italic tracking-tighter">Cast Personnel / 角色人员库</h2>
                     <div className="flex items-center gap-6">
                        <div className="flex items-end gap-6 bg-black/5 p-3 rounded-2xl border border-black/5 shadow-inner">
-                          <div className="flex flex-col"><span className="text-[9px] font-black opacity-50 uppercase mb-2 leading-none">Art Style</span><select className={`${theme === 'light' ? 'bg-white border-slate-200 text-slate-800' : 'bg-black/20 border-white/10 text-slate-100'} border rounded-xl px-4 py-1.5 text-[10px] font-black outline-none`} value={prodStyle} onChange={e => setProdStyle(e.target.value as any)}>{["都市言情", "热血玄幻", "悬疑惊悚", "技术专业", "温馨治愈"].map(s => <option key={s} value={s}>{s}</option>)}</select></div>
-                          <div className="flex flex-col"><span className="text-[9px] font-black opacity-50 uppercase mb-2 leading-none">Reading Pace</span><div className={`h-8 w-44 ${theme === 'light' ? 'bg-slate-100 border-slate-200' : 'bg-black/20 border-white/5'} border rounded-xl flex items-center px-4 gap-3 shadow-inner shrink-0`}><input type="range" min="150" max="400" step="10" className="w-full accent-sky-500" value={readingSpeed} onChange={e => setReadingSpeed(Number(e.target.value))} /><span className={`text-[10px] font-mono font-black ${currentTheme.accent} w-8 shrink-0`}>{readingSpeed}</span></div></div>
-                          <button onClick={() => setActiveTab("studio")} className={`h-8 px-4 ${currentTheme.btn} text-white rounded-xl font-black text-[10px] shadow-sm flex items-center justify-center gap-2 hover:translate-y-[-1px] transition-all transform-gpu active:scale-95 shrink-0`}>去制作 <ChevronRight className="w-3 h-3" /></button>
+                          <div className="flex flex-col"><span className="text-[11px] font-black opacity-50 uppercase mb-2 leading-none">Art Style</span><select className={`${theme === 'light' ? 'bg-white border-slate-200 text-slate-800' : 'bg-black/20 border-white/10 text-slate-100'} border rounded-xl px-4 py-1.5 text-xs font-black outline-none`} value={prodStyle} onChange={e => setProdStyle(e.target.value as any)}>{["都市言情", "热血玄幻", "悬疑惊悚", "技术专业", "温馨治愈"].map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+                          <div className="flex flex-col"><span className="text-[11px] font-black opacity-50 uppercase mb-2 leading-none">Reading Pace</span><div className={`h-8 w-44 ${theme === 'light' ? 'bg-slate-100 border-slate-200' : 'bg-black/20 border-white/5'} border rounded-xl flex items-center px-4 gap-3 shadow-inner shrink-0`}><input type="range" min="150" max="400" step="10" className="w-full accent-sky-500" value={readingSpeed} onChange={e => setReadingSpeed(Number(e.target.value))} /><span className={`text-xs font-mono font-black ${currentTheme.accent} w-8 shrink-0`}>{readingSpeed}</span></div></div>
+                          <button onClick={() => setActiveTab("studio")} className={`h-8 px-4 ${currentTheme.btn} text-white rounded-xl font-black text-xs shadow-sm flex items-center justify-center gap-2 hover:translate-y-[-1px] transition-all transform-gpu active:scale-95 shrink-0`}>去制作 <ChevronRight className="w-3 h-3" /></button>
                        </div>
                     </div>
                  </div>
@@ -968,19 +1129,19 @@ ${charPrompt}
                          <div className="flex justify-between items-start mb-5 pr-12">
                             <div>
                                <h3 className="text-lg font-black">{char.name}</h3>
-                               <div className="text-[10px] opacity-40 font-bold mt-1">{char.gender} / {char.age}</div>
+                               <div className="text-xs opacity-40 font-bold mt-1">{char.gender} / {char.age}</div>
                             </div>
                          </div>
                          <p className="text-xs opacity-60 line-clamp-3 leading-relaxed mb-6 flex-1 italic">{char.description}</p>
                          <div className={`mt-auto pt-5 border-t ${currentTheme.border}`}>
-                            <div className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-1.5">Voice Texture</div>
+                            <div className="text-xs font-black opacity-30 uppercase tracking-widest mb-1.5">Voice Texture</div>
                             <div className={`text-[11px] font-bold ${currentTheme.accent} leading-tight`}>{char.tone}</div>
                          </div>
                       </div>
                     ))}
                     <button onClick={() => setCharacters([...characters, { id: `c-${Date.now()}`, name: "新演员", gender: "男", age: "青年", tone: "中性", description: "输入详细设定..." }])} className={`${theme === 'light' ? 'border-slate-200 shadow-sm' : theme === 'forest' ? 'border-emerald-800/50 bg-black/20 text-emerald-100' : 'border-slate-800 bg-black/20 text-slate-300'} border-2 border-dashed rounded-[2rem] flex flex-col items-center justify-center transition-all group hover:border-sky-500 min-h-[260px]`}>
                        <Plus className="w-10 h-10 mb-3 group-hover:scale-110 group-hover:text-sky-500 transition-all opacity-20" />
-                       <span className="text-[9px] font-black uppercase tracking-[0.4em] opacity-30">Deploy Actor</span>
+                       <span className="text-[11px] font-black uppercase tracking-[0.4em] opacity-30">Deploy Actor</span>
                     </button>
                  </div>
               </motion.div>
@@ -990,7 +1151,7 @@ ${charPrompt}
               <motion.div key="studio" initial={{ opacity: 0, scale: 1.01 }} animate={{ opacity: 1, scale: 1 }} className={`flex-1 flex flex-col p-6 gap-6 overflow-hidden ${theme === 'light' ? 'bg-slate-100' : 'bg-transparent'}`}>
                  <div className="flex items-center justify-between px-8 py-4 shrink-0">
                     <div className="flex items-center gap-6">
-                       <div className="flex flex-col"><span className={`text-[9px] font-black ${currentTheme.accent} uppercase tracking-widest mb-1 leading-none`}>Production Studio</span><span className="text-lg font-black truncate max-w-[320px] italic">{currentChapter.title}</span></div>
+                       <div className="flex flex-col"><span className={`text-[11px] font-black ${currentTheme.accent} uppercase tracking-widest mb-1 leading-none`}>Production Studio</span><span className="text-lg font-black truncate max-w-[320px] italic">{currentChapter.title}</span></div>
                     </div>
                     <button disabled={isProcessing || !currentChapter.novelText} onClick={runGeneration} className={`h-11 px-10 ${currentTheme.btn} rounded-2xl text-[11px] font-black shadow-2xl hover:brightness-110 transition-all flex items-center gap-4 active:scale-95 text-white transform-gpu`}>{isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-5 h-5 fill-white" /> 向 AI 发起演播生成指令</>}</button>
                  </div>
@@ -1000,7 +1161,7 @@ ${charPrompt}
                       {showSource && (
                         <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: "38%", opacity: 1 }} exit={{ width: 0, opacity: 0 }} className={`flex flex-col border ${currentTheme.border} rounded-[3rem] ${theme === 'light' ? 'bg-white shadow-2xl shadow-slate-200/50' : 'bg-black/20 shadow-2xl shadow-black/40'} overflow-hidden shrink-0 relative`}>
                            <div className={`px-6 py-2 border-b ${currentTheme.border} flex justify-between items-center ${theme === 'light' ? 'bg-slate-50' : 'bg-black/40'}`}>
-                              <span className="text-[10px] font-black opacity-30 uppercase tracking-[0.2em] italic">Original Asset</span>
+                              <span className="text-xs font-black opacity-30 uppercase tracking-[0.2em] italic">Original Asset</span>
                               <button onClick={() => setShowSource(false)} className={`p-1 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100 text-slate-400' : 'hover:bg-white/10 text-slate-600'}`}><EyeOff className="w-4 h-4" /></button>
                            </div>
                            <div 
@@ -1057,15 +1218,19 @@ ${charPrompt}
                        <div className={`px-10 py-5 border-b ${theme === 'light' ? 'border-sky-50 bg-sky-50/30' : 'border-sky-500/10 bg-sky-950/30'} flex justify-between items-center shrink-0`}>
                           <div className="flex items-center gap-6">
                              <div className="flex items-center gap-3">
-                                <span className="text-[10px] font-black italic opacity-40 uppercase tracking-[0.3em]">Production Workbench</span>
+                                <span className="text-xs font-black italic opacity-40 uppercase tracking-[0.3em]">Production Workbench</span>
                                 <div className="flex items-center gap-2 px-3 py-1 bg-sky-500/10 rounded-full border border-sky-500/20">
                                    <input type="checkbox" checked={syncScroll} onChange={() => setSyncScroll(!syncScroll)} className="w-3 h-3 rounded bg-sky-500 cursor-pointer" />
-                                   <span className="text-[8px] font-black text-sky-500 uppercase tracking-widest ml-1 cursor-pointer">Sync Scroll {syncScroll ? 'On' : 'Off'}</span>
+                                   <span className="text-[10px] font-black text-sky-500 uppercase tracking-widest ml-1 cursor-pointer" onClick={() => setSyncScroll(!syncScroll)}>Sync Scroll {syncScroll ? 'On' : 'Off'}</span>
                                 </div>
+                                <button onClick={() => setIsZenMode(!isZenMode)} className={`ml-3 px-3 py-1 rounded-full border ${isZenMode ? 'bg-amber-500 text-white border-amber-500' : 'bg-transparent border-slate-500/30 text-slate-500 opacity-60'} hover:opacity-100 flex items-center gap-2 transition-all`}>
+                                  {isZenMode ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+                                  <span className="text-[10px] font-black uppercase tracking-widest leading-none mt-[1px]">Zen Mode</span>
+                                </button>
                              </div>
                           </div>
                           <div className="flex items-center gap-4">
-                             <span className="text-[9px] font-black opacity-30 uppercase tracking-[0.2em]">Chapter Nodes: {currentChapter.parsedElements.length}</span>
+                             <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em]">Chapter Nodes: {currentChapter.parsedElements.length}</span>
                           </div>
                        </div>
                        <Reorder.Group 
@@ -1109,7 +1274,7 @@ ${charPrompt}
                                                 else if (val === 'sound_effect') updateScriptElement(el.id, { type: 'sound_effect', speaker: '' });
                                                 else updateScriptElement(el.id, { type: 'dialogue', speaker: val });
                                               }}
-                                              className={`appearance-none outline-none border-none text-[10px] sm:text-xs font-black tracking-widest pl-4 pr-8 py-1.5 rounded-full shadow-sm cursor-pointer ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-amber-950' : 'bg-pink-600 text-white'}`}
+                                              className={`appearance-none outline-none border-none text-xs sm:text-xs font-black tracking-widest pl-4 pr-8 py-1.5 rounded-full shadow-sm cursor-pointer ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-amber-950' : 'bg-pink-600 text-white'}`}
                                            >
                                               <option value="narration" className="text-slate-900 bg-white text-sm font-medium py-1">旁白</option>
                                               <option value="sound_effect" className="text-slate-900 bg-white text-sm font-medium py-1">音效</option>
@@ -1124,11 +1289,39 @@ ${charPrompt}
                                            </select>
                                            <ChevronDown className="w-3 h-3 absolute right-3 top-1/2 -translate-y-1/2 opacity-60 text-current pointer-events-none" />
                                         </div>
-                                        {el.type !== 'sound_effect' && <span className="font-mono font-black uppercase tracking-tighter text-[10px] opacity-20">// {el.meta}</span>}
+                                        {el.type !== 'sound_effect' && <span className="font-mono font-black uppercase tracking-tighter text-xs opacity-20">// {el.meta}</span>}
                                      </div>
-                                     <button onClick={() => setEditingElementId(editingElementId === el.id ? null : el.id)} className={`p-2 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100' : 'hover:bg-white/10'} opacity-0 group-hover:opacity-100`}>
-                                        <Pencil className={`w-3.5 h-3.5 ${editingElementId === el.id ? 'text-sky-500' : 'opacity-30'}`} />
-                                     </button>
+                                     <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                                       <button onClick={async () => {
+                                         if (!el.content) return;
+                                         setIsProcessing(true);
+                                         try {
+                                           const charPrompt = characters.map(c => `- ${c.name}：${c.gender}/${c.age}，${c.tone}。${c.description}`).join("\n");
+                                           const instruction = `你是有声书台词编辑。根据原台词和全局设定，重写这句台词。
+要求：保持原意，但提供3种不同情感色彩（如更激烈、更平淡、更冷峻）的变体，只需要返回重写后的核心台词内容，不要任何前缀。
+输出格式纯文本数组JSON：["变体1", "变体2", "变体3"]`;
+                                           const res = await generateAiContent({
+                                             model: localStorage.getItem('vox_custom_model') || selectedModel,
+                                             prompt: `角色：${el.speaker || '旁白'}\n原内容：${el.content}\n剧情提示词：${el.meta}`,
+                                             systemInstruction: instruction,
+                                             jsonMode: true
+                                           });
+                                           const vars = JSON.parse(res);
+                                           if(vars && vars[0]) {
+                                              updateScriptElement(el.id, { content: vars[0] });
+                                              alert(`已应用重写变体1。其他变体：\n2: ${vars[1]}\n3: ${vars[2]}`);
+                                           }
+                                         } catch(e) { console.error(e); } finally { setIsProcessing(false); }
+                                       }} className={`p-2 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100 text-sky-500' : 'hover:bg-white/10 text-sky-400'}`} title="AI 重写这句">
+                                         <Sparkles className="w-3.5 h-3.5" />
+                                       </button>
+                                       <button onClick={() => handlePlayAudio(el)} className={`p-2 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100 text-slate-500' : 'hover:bg-white/10 text-slate-400'}`} title="试听台词 (TTS Preview)">
+                                         <Music4 className="w-3.5 h-3.5" />
+                                       </button>
+                                       <button onClick={() => setEditingElementId(editingElementId === el.id ? null : el.id)} className={`p-2 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100 text-slate-500' : 'hover:bg-white/10 text-slate-400'}`} title="编辑文本">
+                                         <Pencil className={`w-3.5 h-3.5 ${editingElementId === el.id ? 'text-sky-500' : ''}`} />
+                                       </button>
+                                     </div>
                                   </div>
 
                                   {editingElementId === el.id ? (
@@ -1169,16 +1362,16 @@ ${charPrompt}
               <h2 className="text-4xl font-black italic mb-12 tracking-tighter">Edit Persona / 精修建模</h2>
               <div className="space-y-10">
                  <div className="grid grid-cols-2 gap-10">
-                    <div className="space-y-3"><label className="text-[10px] font-black opacity-40 uppercase tracking-[0.3em] ml-2">Display Name</label><input className={`w-full border rounded-[2rem] p-6 text-sm font-black focus:border-sky-500 outline-none transition-all ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.name} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, name: e.target.value } : c))} /></div>
-                    <div className="space-y-3"><label className="text-[10px] font-black opacity-40 uppercase tracking-[0.3em] ml-2">Type Guard</label><input className={`w-full border rounded-[2rem] p-6 text-sm font-black focus:border-sky-500 outline-none transition-all ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={`${characters.find(c => c.id === editingCharId)?.gender}/${characters.find(c => c.id === editingCharId)?.age}`} onChange={e => {
+                    <div className="space-y-3"><label className="text-xs font-black opacity-40 uppercase tracking-[0.3em] ml-2">Display Name</label><input className={`w-full border rounded-[2rem] p-6 text-sm font-black focus:border-sky-500 outline-none transition-all ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.name} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, name: e.target.value } : c))} /></div>
+                    <div className="space-y-3"><label className="text-xs font-black opacity-40 uppercase tracking-[0.3em] ml-2">Type Guard</label><input className={`w-full border rounded-[2rem] p-6 text-sm font-black focus:border-sky-500 outline-none transition-all ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={`${characters.find(c => c.id === editingCharId)?.gender}/${characters.find(c => c.id === editingCharId)?.age}`} onChange={e => {
                        const parts = e.target.value.split("/");
                        const g = parts[0] || "";
                        const a = parts[1] || "";
                        setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, gender: g, age: a } : c));
                     }} /></div>
                  </div>
-                 <div className="space-y-3"><label className="text-[10px] font-black opacity-40 uppercase tracking-[0.3em] ml-2">Tone Instruction</label><input className={`w-full border rounded-[2rem] p-6 text-sm font-black focus:border-sky-500 outline-none transition-all ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.tone} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, tone: e.target.value } : c))} /></div>
-                 <div className="space-y-3"><label className="text-[10px] font-black opacity-40 uppercase tracking-[0.3em] ml-2">Actor Profile Instruction</label><textarea className={`w-full h-44 border rounded-[2.5rem] p-6 text-sm resize-none scrollbar-hide focus:border-sky-500 outline-none transition-all leading-relaxed ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.description} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, description: e.target.value } : c))} /></div>
+                 <div className="space-y-3"><label className="text-xs font-black opacity-40 uppercase tracking-[0.3em] ml-2">Tone Instruction</label><input className={`w-full border rounded-[2rem] p-6 text-sm font-black focus:border-sky-500 outline-none transition-all ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.tone} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, tone: e.target.value } : c))} /></div>
+                 <div className="space-y-3"><label className="text-xs font-black opacity-40 uppercase tracking-[0.3em] ml-2">Actor Profile Instruction</label><textarea className={`w-full h-44 border rounded-[2.5rem] p-6 text-sm resize-none scrollbar-hide focus:border-sky-500 outline-none transition-all leading-relaxed ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.description} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, description: e.target.value } : c))} /></div>
               </div>
               <button onClick={() => setEditingCharId(null)} className={`w-full h-20 ${theme === 'light' ? 'bg-slate-900 text-white' : 'bg-white text-slate-950'} rounded-[2.5rem] mt-12 font-black shadow-2xl transition-all uppercase tracking-widest text-sm hover:translate-y-[-4px]`}>Submit Refinement</button>
            </div>
@@ -1223,7 +1416,7 @@ ${charPrompt}
                          className={`text-left p-4 flex flex-col gap-1 rounded-xl border-2 transition-all ${selectedModel === m.id ? 'border-sky-500 bg-sky-500/10 shadow-md' : `border-transparent ${theme === 'light' ? 'bg-white shadow-sm hover:shadow-md' : 'bg-black/20 hover:bg-black/40'}`}`}
                        >
                          <span className="font-black text-[13px] break-all">{m.name}</span>
-                         <span className="font-bold text-[10px] opacity-60">{m.desc}</span>
+                         <span className="font-bold text-xs opacity-60">{m.desc}</span>
                        </button>
                      ))}
                    </div>
@@ -1240,7 +1433,7 @@ ${charPrompt}
                    
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                      <div className="flex flex-col gap-2">
-                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">API 协议格式</label>
+                       <label className="text-xs font-black uppercase tracking-widest opacity-50">API 协议格式</label>
                        <select 
                          value={localApiFormat}
                          onChange={(e) => setLocalApiFormat(e.target.value)}
@@ -1251,7 +1444,7 @@ ${charPrompt}
                        </select>
                      </div>
                      <div className="flex flex-col gap-2">
-                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">API Base URL</label>
+                       <label className="text-xs font-black uppercase tracking-widest opacity-50">API Base URL</label>
                        <input 
                          type="text" 
                          placeholder="如 https://api.deepseek.com/v1" 
@@ -1261,7 +1454,7 @@ ${charPrompt}
                        />
                      </div>
                      <div className="flex flex-col gap-2">
-                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">Custom API Key</label>
+                       <label className="text-xs font-black uppercase tracking-widest opacity-50">Custom API Key</label>
                        <input 
                          type="password" 
                          placeholder="所选厂商的官方 API Key" 
@@ -1271,7 +1464,7 @@ ${charPrompt}
                        />
                      </div>
                      <div className="flex flex-col gap-2">
-                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">自定义特定模型名 (Optional)</label>
+                       <label className="text-xs font-black uppercase tracking-widest opacity-50">自定义特定模型名 (Optional)</label>
                        <input 
                          type="text" 
                          placeholder="如 deepseek-chat 或 qwen-plus" 
@@ -1285,15 +1478,15 @@ ${charPrompt}
                    <div className="flex items-center justify-between pt-5 border-t border-emerald-500/10">
                      <div className="flex items-center gap-2">
                         {localApiKey || localBaseUrl ? (
-                          <div className="px-3 py-1 bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 rounded-full text-[10px] font-black flex items-center gap-1 uppercase tracking-widest">
+                          <div className="px-3 py-1 bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 rounded-full text-xs font-black flex items-center gap-1 uppercase tracking-widest">
                              <CheckCircle2 className="w-3 h-3" /> Custom Config Active
                           </div>
                         ) : hasCustomApiKey ? (
-                          <div className="px-3 py-1 bg-sky-500/10 text-sky-600 border border-sky-500/20 rounded-full text-[10px] font-black flex items-center gap-1 uppercase tracking-widest">
+                          <div className="px-3 py-1 bg-sky-500/10 text-sky-600 border border-sky-500/20 rounded-full text-xs font-black flex items-center gap-1 uppercase tracking-widest">
                              <CheckCircle2 className="w-3 h-3" /> AI Studio Secure Key Active
                           </div>
                         ) : (
-                          <div className="px-3 py-1 bg-amber-500/10 text-amber-600 border border-amber-500/20 rounded-full text-[10px] font-black flex items-center gap-1 uppercase tracking-widest">
+                          <div className="px-3 py-1 bg-amber-500/10 text-amber-600 border border-amber-500/20 rounded-full text-xs font-black flex items-center gap-1 uppercase tracking-widest">
                              <AlertCircle className="w-3 h-3" /> Default Pool Quota
                           </div>
                         )}
@@ -1308,7 +1501,7 @@ ${charPrompt}
                              alert('该功能仅在实际部署环境中可用，或者您可以直接在上方输入 Custom API Key');
                            }
                          }}
-                         className={`px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all active:scale-95 shadow-sm ${theme === 'light' ? 'bg-slate-900 text-white hover:bg-emerald-600' : 'bg-emerald-500 text-white hover:bg-emerald-400'}`}
+                         className={`px-5 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest transition-all active:scale-95 shadow-sm ${theme === 'light' ? 'bg-slate-900 text-white hover:bg-emerald-600' : 'bg-emerald-500 text-white hover:bg-emerald-400'}`}
                        >
                          {hasCustomApiKey ? '更改平台安全 Key' : '绑定平台安全 Key'}
                        </button>
@@ -1355,6 +1548,12 @@ ${charPrompt}
                       <div className="text-xs opacity-60 mt-1">带有颜色区分的呈现格式，可用于汇报或审阅</div>
                     </div>
                   </button>
+                  <button onClick={() => setExportFormat('excel')} className={`text-left flex items-center justify-between p-4 rounded-xl border-2 transition-all ${exportFormat === 'excel' ? 'border-emerald-600 bg-emerald-600/10' : `border-transparent ${theme === 'light' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-white/5 hover:bg-white/10'}`}`}>
+                    <div>
+                      <div className="font-bold">标准行业剧本底表 (.xlsx)</div>
+                      <div className="text-xs opacity-60 mt-1">含角色、提示词、台词、字数等多列</div>
+                    </div>
+                  </button>
                   <button onClick={() => setExportFormat('markdown')} className={`text-left flex items-center justify-between p-4 rounded-xl border-2 transition-all ${exportFormat === 'markdown' ? 'border-emerald-500 bg-emerald-500/10' : `border-transparent ${theme === 'light' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-white/5 hover:bg-white/10'}`}`}>
                     <div>
                       <div className="font-bold">Markdown (.md)</div>
@@ -1381,19 +1580,19 @@ ${charPrompt}
                 <div>
                   <h2 className="text-4xl font-black italic tracking-tighter leading-none mb-3">Vault / 项目中台</h2>
                   <div className="flex items-center gap-3">
-                    <div className="px-3 py-1 bg-sky-500/10 text-sky-500 text-[8px] font-black rounded-full border border-sky-500/20 uppercase tracking-widest">Master Repository</div>
-                    <span className="text-[9px] opacity-30 font-black uppercase tracking-widest leading-none">Global session storage active</span>
+                    <div className="px-3 py-1 bg-sky-500/10 text-sky-500 text-[10px] font-black rounded-full border border-sky-500/20 uppercase tracking-widest">Master Repository</div>
+                    <span className="text-[11px] opacity-30 font-black uppercase tracking-widest leading-none">Global session storage active</span>
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={saveAsProject} className={`px-6 py-3 ${theme === 'light' ? 'bg-amber-500' : 'bg-amber-600'} rounded-xl text-[10px] font-black text-white flex items-center gap-2 hover:translate-y-[-2px] transition-all shadow-xl`}>
+                  <button onClick={saveAsProject} className={`px-6 py-3 ${theme === 'light' ? 'bg-amber-500' : 'bg-amber-600'} rounded-xl text-xs font-black text-white flex items-center gap-2 hover:translate-y-[-2px] transition-all shadow-xl`}>
                     <Copy className="w-3.5 h-3.5" /> 另存为新项目
                   </button>
-                  <label className={`cursor-pointer px-6 py-3 ${theme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-900' : 'bg-black/40 border-white/5 text-white'} border rounded-xl text-[10px] font-black flex items-center gap-2 hover:bg-sky-500 hover:text-white transition-all shadow-lg active:translate-y-0.5`}>
+                  <label className={`cursor-pointer px-6 py-3 ${theme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-900' : 'bg-black/40 border-white/5 text-white'} border rounded-xl text-xs font-black flex items-center gap-2 hover:bg-sky-500 hover:text-white transition-all shadow-lg active:translate-y-0.5`}>
                     <Upload className="w-3.5 h-3.5" /> 导入项目
                     <input type="file" accept=".json" className="hidden" onChange={handleImportProject} />
                   </label>
-                  <button onClick={createNewProject} className={`px-6 py-3 ${currentTheme.btn} rounded-xl text-[10px] font-black text-white flex items-center gap-2 hover:translate-y-[-2px] transition-all shadow-xl`}>
+                  <button onClick={createNewProject} className={`px-6 py-3 ${currentTheme.btn} rounded-xl text-xs font-black text-white flex items-center gap-2 hover:translate-y-[-2px] transition-all shadow-xl`}>
                     <Plus className="w-3.5 h-3.5" /> 启动全新剧作
                   </button>
                 </div>
@@ -1401,7 +1600,7 @@ ${charPrompt}
 
               <div className="flex-1 flex gap-8 overflow-hidden min-h-0">
                 <div className="flex-1 flex flex-col overflow-hidden">
-                  <div className="text-[9px] font-black opacity-30 uppercase tracking-[0.4em] mb-4 ml-1 italic">Stored Creations / 已存档 ({savedProjects.length})</div>
+                  <div className="text-[11px] font-black opacity-30 uppercase tracking-[0.4em] mb-4 ml-1 italic">Stored Creations / 已存档 ({savedProjects.length})</div>
                   <div className="flex-1 overflow-y-auto space-y-3 pr-4 scrollbar-hide pb-8">
                     {savedProjects.length === 0 ? (
                       <div className={`h-full flex flex-col items-center justify-center gap-6 ${theme === 'light' ? 'bg-slate-50' : 'bg-black/10'} rounded-[2.5rem] border-2 border-dashed ${theme === 'light' ? 'border-slate-200' : 'border-white/5'}`}>
@@ -1409,7 +1608,7 @@ ${charPrompt}
                           <FolderOpen className="w-24 h-24 stroke-[0.5px] opacity-10" />
                           <div className="absolute inset-0 flex items-center justify-center"><Plus className="w-8 h-8 text-sky-500 opacity-20 animate-pulse" /></div>
                         </div>
-                        <p className="text-[10px] font-black uppercase tracking-[0.5em] opacity-20 ml-[0.5em]">No Data in Vault</p>
+                        <p className="text-xs font-black uppercase tracking-[0.5em] opacity-20 ml-[0.5em]">No Data in Vault</p>
                       </div>
                     ) : (
                       savedProjects.map(p => (
@@ -1420,7 +1619,7 @@ ${charPrompt}
                             </div>
                             <div>
                               <h4 className="text-lg font-black italic tracking-tighter mb-0.5">{p.name}</h4>
-                              <div className="flex items-center gap-3 text-[9px] font-black opacity-30 uppercase tracking-widest italic">
+                              <div className="flex items-center gap-3 text-[11px] font-black opacity-30 uppercase tracking-widest italic">
                                 <span className="flex items-center gap-1.5"><Clock className="w-3 h-3" /> {new Date(p.lastModified).toLocaleDateString()}</span>
                                 <span>• {p.chapters.length} CHS</span>
                                 <span>• {p.characters.length} CAST</span>
@@ -1428,7 +1627,7 @@ ${charPrompt}
                             </div>
                           </div>
                           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all translate-x-2 group-hover:translate-x-0">
-                             {projectId !== p.id && <button onClick={() => loadProject(p)} className={`px-5 py-2.5 ${theme === 'light' ? 'bg-slate-900 text-white' : 'bg-white text-slate-950'} rounded-lg text-[10px] font-black hover:scale-105 active:scale-95 transition-all shadow-lg`}>LOAD</button>}
+                             {projectId !== p.id && <button onClick={() => loadProject(p)} className={`px-5 py-2.5 ${theme === 'light' ? 'bg-slate-900 text-white' : 'bg-white text-slate-950'} rounded-lg text-xs font-black hover:scale-105 active:scale-95 transition-all shadow-lg`}>LOAD</button>}
                              <button onClick={() => exportProjectToJSON(p)} className={`p-2.5 rounded-lg ${theme === 'light' ? 'bg-white shadow-md' : 'bg-white/10'} hover:text-sky-500 transition-all`} title="导出"><Download className="w-4 h-4" /></button>
                              <button onClick={() => deleteProject(p.id)} className={`p-2.5 rounded-lg ${theme === 'light' ? 'bg-white shadow-md' : 'bg-white/10'} hover:text-red-500 transition-all`} title="删除"><Trash2 className="w-4 h-4" /></button>
                           </div>
@@ -1440,15 +1639,15 @@ ${charPrompt}
 
                 <div className="w-68 hidden xl:flex flex-col gap-5 shrink-0">
                    <div className={`p-8 rounded-[2.5rem] ${theme === 'light' ? 'bg-sky-50 text-sky-900 border-sky-100' : 'bg-sky-500/5 text-sky-400 border-sky-500/20'} border flex flex-col min-h-0 h-full overflow-hidden`}>
-                      <span className="text-[9px] font-black uppercase tracking-widest mb-6 block italic">Vitals</span>
+                      <span className="text-[11px] font-black uppercase tracking-widest mb-6 block italic">Vitals</span>
                       <div className="space-y-8 flex-1 overflow-y-auto scrollbar-hide pr-2">
-                         <div><div className="text-3xl font-black italic tracking-tighter leading-none mb-1">98%</div><div className="text-[8px] font-black opacity-40 uppercase">Consistency</div></div>
-                         <div><div className="text-3xl font-black italic tracking-tighter leading-none mb-1">{savedProjects.length}</div><div className="text-[8px] font-black opacity-40 uppercase">Total Items</div></div>
+                         <div><div className="text-3xl font-black italic tracking-tighter leading-none mb-1">98%</div><div className="text-[10px] font-black opacity-40 uppercase">Consistency</div></div>
+                         <div><div className="text-3xl font-black italic tracking-tighter leading-none mb-1">{savedProjects.length}</div><div className="text-[10px] font-black opacity-40 uppercase">Total Items</div></div>
                          <div className="pt-4 border-t border-sky-500/10">
-                            <h4 className="text-[9px] font-black opacity-60 uppercase mb-3">Recent Activity</h4>
+                            <h4 className="text-[11px] font-black opacity-60 uppercase mb-3">Recent Activity</h4>
                             <div className="space-y-3">
                                {savedProjects.slice(0, 3).map(p => (
-                                 <div key={p.id} className="text-[10px] font-bold opacity-40 truncate flex items-center gap-2">
+                                 <div key={p.id} className="text-xs font-bold opacity-40 truncate flex items-center gap-2">
                                     <Clock className="w-3 h-3" /> {p.name}
                                  </div>
                                ))}
@@ -1457,7 +1656,7 @@ ${charPrompt}
                       </div>
                       <div className="mt-8 pt-6 border-t border-sky-500/10 shrink-0">
                          <div className="h-1 w-full bg-sky-500/20 rounded-full overflow-hidden mb-3"><div className="h-full bg-sky-500 w-2/3" /></div>
-                         <p className="text-[8px] font-bold opacity-50 uppercase tracking-tighter italic leading-relaxed">Local pulse is synchronized with browser cache.</p>
+                         <p className="text-[10px] font-bold opacity-50 uppercase tracking-tighter italic leading-relaxed">Local pulse is synchronized with browser cache.</p>
                       </div>
                    </div>
                 </div>
@@ -1468,11 +1667,11 @@ ${charPrompt}
                   <div className="flex items-center gap-5">
                     <div className="w-3.5 h-3.5 bg-green-500 rounded-full animate-pulse shadow-[0_0_12px_rgba(34,197,94,0.5)]" />
                     <div>
-                      <p className="text-[8px] font-black opacity-30 uppercase tracking-widest mb-0.5 italic">Active production slot</p>
+                      <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-0.5 italic">Active production slot</p>
                       <p className="text-xl font-black italic tracking-tighter">{projectName}</p>
                     </div>
                   </div>
-                  <button onClick={saveCurrentProject} className={`px-10 py-4 ${currentTheme.btn} rounded-2xl text-[10px] font-black text-white shadow-xl hover:translate-y-[-4px] active:translate-y-0 transition-all flex items-center gap-3`}>
+                  <button onClick={saveCurrentProject} className={`px-10 py-4 ${currentTheme.btn} rounded-2xl text-xs font-black text-white shadow-xl hover:translate-y-[-4px] active:translate-y-0 transition-all flex items-center gap-3`}>
                     <Save className="w-4 h-4" /> <span>同步当前所有变更</span>
                   </button>
                 </div>
@@ -1498,7 +1697,7 @@ ${charPrompt}
         </motion.div>
       )}
 
-      <footer className={`h-10 ${theme === 'light' ? 'bg-slate-200 text-slate-500' : 'bg-black/20 text-current opacity-40'} border-t ${currentTheme.border} flex items-center justify-between px-10 text-[9px] font-mono tracking-[0.5em] uppercase pointer-events-none transition-colors shrink-0`}>
+      <footer className={`h-10 ${theme === 'light' ? 'bg-slate-200 text-slate-500' : 'bg-black/20 text-current opacity-40'} border-t ${currentTheme.border} flex items-center justify-between px-10 text-[11px] font-mono tracking-[0.5em] uppercase pointer-events-none transition-colors shrink-0`}>
          <div>VoxStudio Pro Build v4.8.2 | Environment Stable</div>
          <div className="flex gap-10"><span>AI Rendering Agent: Online</span><span>Production Pipeline: Ready</span></div>
       </footer>
