@@ -98,7 +98,8 @@ export default function App() {
 
   // --- 设置与模型控制状态 ---
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("gemini-3.1-pro-preview");
+  const [selectedModel, setSelectedModel] = useState("gemini-3.1-flash-lite-preview");
+  const [openRoleDropdownId, setOpenRoleDropdownId] = useState<string | null>(null);
   const [hasCustomApiKey, setHasCustomApiKey] = useState(false);
   const [localApiKey, setLocalApiKey] = useState(() => localStorage.getItem('vox_api_key') || "");
   const [localBaseUrl, setLocalBaseUrl] = useState(() => localStorage.getItem('vox_base_url') || "");
@@ -528,6 +529,9 @@ export default function App() {
         if (speaker === "旁白") type = "narration";
         if (speaker.includes("场景音") || speaker.includes("环境音") || speaker.includes("音效")) type = "sound_effect";
         elements.push({ id: `el-${Date.now()}-${i}`, type, meta, content, speaker: type === "dialogue" ? speaker : undefined, sourceParaIds });
+      } else if (elements.length > 0) {
+        // 如果当前行匹配失败（例如多行内容），追加到上一条
+        elements[elements.length - 1].content += (elements[elements.length - 1].content ? "\n" : "") + line.trim();
       }
     });
     return elements;
@@ -1034,7 +1038,7 @@ ${charPrompt}
                               }}
                               className={`script-card group relative overflow-hidden transition-all duration-500 rounded-3xl border ${el.type === 'sound_effect' ? (theme === 'light' ? 'bg-amber-50/50 border-amber-200' : theme === 'forest' ? 'bg-yellow-900/40 border-yellow-700/50' : 'bg-amber-900/30 border-amber-800/50') : (theme === 'light' ? 'bg-white border-slate-100 shadow-sm' : theme === 'forest' ? 'bg-emerald-950/40 border-emerald-800/30 shadow-sm' : 'bg-slate-800/50 border-slate-700/50')} ${syncScroll ? '[&.active-card]:ring-2 [&.active-card]:ring-sky-500/40 [&.active-card]:border-sky-400 [&.active-card]:scale-[1.01] [&.active-card]:shadow-xl [&.active-card]:opacity-100 opacity-40 hover:opacity-100' : 'opacity-100'}`}
                             >
-                               <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-sky-500 opacity-0 group-[.active-card]:opacity-100 transition-opacity duration-500" />
+                               <div className="absolute left-0 top-6 bottom-6 w-1.5 bg-sky-500 rounded-r-full opacity-0 group-[.active-card]:opacity-100 transition-opacity duration-500" />
                                
                                <div className="p-8">
                                   <div className="flex items-center justify-between mb-4">
@@ -1064,7 +1068,7 @@ ${charPrompt}
                                                 <option value={el.speaker} className="text-slate-900 bg-white text-sm font-medium py-1">{el.speaker} (未知角色)</option>
                                               )}
                                            </select>
-                                           <ChevronDown className="w-3 h-3 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-60 text-current" />
+                                           <ChevronDown className="w-3 h-3 absolute right-3 top-1/2 -translate-y-1/2 opacity-60 text-current pointer-events-none" />
                                         </div>
                                         {el.type !== 'sound_effect' && <span className="font-mono font-black uppercase tracking-tighter text-[10px] opacity-20">// {el.meta}</span>}
                                      </div>
