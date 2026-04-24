@@ -5,6 +5,7 @@
 
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
 import { 
   Upload, FileText, Settings, Mic, Download, Copy, Trash2, 
   Loader2, Sparkles, Zap, Users, PlayCircle, CheckCircle2, 
@@ -33,6 +34,51 @@ const getAiClient = () => {
     config.httpOptions = { baseUrl: customUrl };
   }
   return new GoogleGenAI(config);
+};
+
+const generateAiContent = async (options: { model: string, prompt: string, systemInstruction?: string, jsonMode?: boolean }) => {
+  const format = localStorage.getItem('vox_api_format') || 'gemini';
+  const customKey = localStorage.getItem('vox_api_key') || undefined;
+  const customUrl = localStorage.getItem('vox_base_url') || undefined;
+
+  if (format === 'openai' || customUrl?.includes('deepseek') || customUrl?.includes('aliyuncs')) {
+    const apiKey = customKey || ""; 
+    if (!apiKey && !(format === 'openai' && process.env.GEMINI_API_KEY)) {
+      throw new Error("使用 第三方官方(DeepSeek/Aliyun) 或 OpenAI 格式 需要提供对应的 API Key");
+    }
+
+    const openai = new OpenAI({
+      apiKey: apiKey || process.env.GEMINI_API_KEY,
+      baseURL: customUrl,
+      dangerouslyAllowBrowser: true
+    });
+
+    const messages: any[] = [];
+    if (options.systemInstruction) {
+      messages.push({ role: 'system', content: options.systemInstruction });
+    }
+    messages.push({ role: 'user', content: options.prompt });
+
+    const completion = await openai.chat.completions.create({
+      model: options.model,
+      messages,
+      response_format: options.jsonMode ? { type: "json_object" } : undefined,
+      temperature: options.jsonMode ? 0.1 : 0.7,
+    });
+
+    return completion.choices[0].message.content;
+  } else {
+    const response = await getAiClient().models.generateContent({
+      model: options.model,
+      contents: [{ role: "user", parts: [{ text: options.prompt }] }],
+      config: { 
+        systemInstruction: options.systemInstruction, 
+        temperature: options.jsonMode ? 0.1 : 0.7,
+        responseMimeType: options.jsonMode ? "application/json" : undefined 
+      }
+    });
+    return response.text;
+  }
 };
 
 // --- 类型定义 ---
@@ -103,6 +149,8 @@ export default function App() {
   const [hasCustomApiKey, setHasCustomApiKey] = useState(false);
   const [localApiKey, setLocalApiKey] = useState(() => localStorage.getItem('vox_api_key') || "");
   const [localBaseUrl, setLocalBaseUrl] = useState(() => localStorage.getItem('vox_base_url') || "");
+  const [localApiFormat, setLocalApiFormat] = useState(() => localStorage.getItem('vox_api_format') || "gemini");
+  const [localCustomModel, setLocalCustomModel] = useState(() => localStorage.getItem('vox_custom_model') || "");
 
   useEffect(() => {
     localStorage.setItem('vox_api_key', localApiKey);
@@ -111,6 +159,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('vox_base_url', localBaseUrl);
   }, [localBaseUrl]);
+
+  useEffect(() => {
+    localStorage.setItem('vox_api_format', localApiFormat);
+  }, [localApiFormat]);
+
+  useEffect(() => {
+    localStorage.setItem('vox_custom_model', localCustomModel);
+  }, [localCustomModel]);
 
   useEffect(() => {
     if (window.aistudio?.hasSelectedApiKey) {
@@ -570,12 +626,13 @@ ${charPrompt}
       
       const numberedText = currentChapter.novelText.split("\n").filter(p => p.trim()).map((p, i) => `[${i}] ${p}`).join("\n");
 
-      const response = await getAiClient().models.generateContent({
-        model: selectedModel,
-        contents: [{ role: "user", parts: [{ text: numberedText }] }],
-        config: { systemInstruction, temperature: 0.7 }
+      const responseText = await generateAiContent({
+        model: localStorage.getItem('vox_custom_model') || selectedModel,
+        prompt: numberedText,
+        systemInstruction: systemInstruction,
+        jsonMode: false
       });
-      const scriptText = response.text;
+      const scriptText = responseText;
       if (!scriptText) throw new Error("AI 返回内容为空");
       updateChapterData({ scriptText, parsedElements: parseScript(scriptText) });
     } catch (e: any) { setError(`制作失败：${e.message}`); } finally { setIsProcessing(false); }
@@ -587,16 +644,13 @@ ${charPrompt}
     try {
       const sample = chapters.slice(0, 10).map(c => c.novelText).join("\n\n").slice(0, 12000);
       const prompt = `你是一个资深文学编辑。请提取小说全部角色。输出严格 JSON 数组格式，不要任何 Markdown 标记或多余文字。字段：[{"name":"姓名","gender":"性别","age":"年龄段","tone":"建议音色","description":"性格特征"}]\n文本：\n${sample}`;
-      const response = await getAiClient().models.generateContent({
-        model: selectedModel,
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: { 
-          responseMimeType: "application/json",
-          temperature: 0.1 
-        }
+      const responseText = await generateAiContent({
+        model: localStorage.getItem('vox_custom_model') || selectedModel,
+        prompt: prompt,
+        jsonMode: true
       });
       
-      let rawText = response.text || "[]";
+      let rawText = responseText || "[]";
       
       // 更鲁棒的 JSON 提取逻辑：寻找第一个 [ 和最后一个 ] 之间的内容
       const firstBracket = rawText.indexOf('[');
@@ -1186,10 +1240,21 @@ ${charPrompt}
                    
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                      <div className="flex flex-col gap-2">
+                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">API 协议格式</label>
+                       <select 
+                         value={localApiFormat}
+                         onChange={(e) => setLocalApiFormat(e.target.value)}
+                         className={`w-full px-4 py-3 rounded-xl border transition-all text-sm font-bold ${theme === 'light' ? 'bg-white border-slate-200 text-slate-800 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20' : 'bg-black/20 border-white/10 text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20'} outline-none`}
+                       >
+                         <option value="gemini">Google Gemini 官方/代理</option>
+                         <option value="openai">OpenAI 兼容 (DeepSeek / 阿里云等)</option>
+                       </select>
+                     </div>
+                     <div className="flex flex-col gap-2">
                        <label className="text-[10px] font-black uppercase tracking-widest opacity-50">API Base URL</label>
                        <input 
                          type="text" 
-                         placeholder="默认官方 (适用OneAPI转发)" 
+                         placeholder="如 https://api.deepseek.com/v1" 
                          value={localBaseUrl}
                          onChange={(e) => setLocalBaseUrl(e.target.value)}
                          className={`w-full px-4 py-3 rounded-xl border transition-all text-sm font-mono ${theme === 'light' ? 'bg-white border-slate-200 text-slate-800 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20' : 'bg-black/20 border-white/10 text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20'} outline-none`} 
@@ -1199,9 +1264,19 @@ ${charPrompt}
                        <label className="text-[10px] font-black uppercase tracking-widest opacity-50">Custom API Key</label>
                        <input 
                          type="password" 
-                         placeholder="填入即可覆盖系统默认额度" 
+                         placeholder="所选厂商的官方 API Key" 
                          value={localApiKey}
                          onChange={(e) => setLocalApiKey(e.target.value)}
+                         className={`w-full px-4 py-3 rounded-xl border transition-all text-sm font-mono ${theme === 'light' ? 'bg-white border-slate-200 text-slate-800 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20' : 'bg-black/20 border-white/10 text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20'} outline-none`} 
+                       />
+                     </div>
+                     <div className="flex flex-col gap-2">
+                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">自定义特定模型名 (Optional)</label>
+                       <input 
+                         type="text" 
+                         placeholder="如 deepseek-chat 或 qwen-plus" 
+                         value={localCustomModel}
+                         onChange={(e) => setLocalCustomModel(e.target.value)}
                          className={`w-full px-4 py-3 rounded-xl border transition-all text-sm font-mono ${theme === 'light' ? 'bg-white border-slate-200 text-slate-800 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20' : 'bg-black/20 border-white/10 text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20'} outline-none`} 
                        />
                      </div>
