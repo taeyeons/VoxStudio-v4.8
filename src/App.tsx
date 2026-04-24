@@ -15,8 +15,25 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence, Reorder } from "motion/react";
 
+declare global {
+  interface Window {
+    aistudio?: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
+
 // --- 初始化 AI ---
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const getAiClient = () => {
+  const customKey = localStorage.getItem('vox_api_key') || undefined;
+  const customUrl = localStorage.getItem('vox_base_url') || undefined;
+  const config: any = { apiKey: customKey || process.env.GEMINI_API_KEY };
+  if (customUrl) {
+    config.httpOptions = { baseUrl: customUrl };
+  }
+  return new GoogleGenAI(config);
+};
 
 // --- 类型定义 ---
 interface Character {
@@ -78,6 +95,29 @@ export default function App() {
   const [savedProjects, setSavedProjects] = useState<Project[]>([]);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [showSaveToast, setShowSaveToast] = useState(false);
+
+  // --- 设置与模型控制状态 ---
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("gemini-3.1-pro-preview");
+  const [hasCustomApiKey, setHasCustomApiKey] = useState(false);
+  const [localApiKey, setLocalApiKey] = useState(() => localStorage.getItem('vox_api_key') || "");
+  const [localBaseUrl, setLocalBaseUrl] = useState(() => localStorage.getItem('vox_base_url') || "");
+
+  useEffect(() => {
+    localStorage.setItem('vox_api_key', localApiKey);
+  }, [localApiKey]);
+
+  useEffect(() => {
+    localStorage.setItem('vox_base_url', localBaseUrl);
+  }, [localBaseUrl]);
+
+  useEffect(() => {
+    if (window.aistudio?.hasSelectedApiKey) {
+      window.aistudio.hasSelectedApiKey().then(hasKey => {
+         if (hasKey) setHasCustomApiKey(true);
+      });
+    }
+  }, []);
 
   // --- UI 控制状态 ---
   const [activeTab, setActiveTab] = useState<"book" | "cast" | "studio">("book");
@@ -526,8 +566,8 @@ ${charPrompt}
       
       const numberedText = currentChapter.novelText.split("\n").filter(p => p.trim()).map((p, i) => `[${i}] ${p}`).join("\n");
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+      const response = await getAiClient().models.generateContent({
+        model: selectedModel,
         contents: [{ role: "user", parts: [{ text: numberedText }] }],
         config: { systemInstruction, temperature: 0.7 }
       });
@@ -543,8 +583,8 @@ ${charPrompt}
     try {
       const sample = chapters.slice(0, 10).map(c => c.novelText).join("\n\n").slice(0, 12000);
       const prompt = `你是一个资深文学编辑。请提取小说全部角色。输出严格 JSON 数组格式，不要任何 Markdown 标记或多余文字。字段：[{"name":"姓名","gender":"性别","age":"年龄段","tone":"建议音色","description":"性格特征"}]\n文本：\n${sample}`;
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+      const response = await getAiClient().models.generateContent({
+        model: selectedModel,
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         config: { 
           responseMimeType: "application/json",
@@ -729,6 +769,9 @@ ${charPrompt}
               </button>
             ))}
           </div>
+          <button onClick={() => setShowSettingsModal(true)} className={`p-2 rounded-xl transition-all border ${currentTheme.border} ${theme === 'light' ? 'bg-slate-100 hover:bg-slate-200 text-slate-600' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`} title="全局配置 (Settings)">
+            <Settings className="w-5 h-5" />
+          </button>
           <div className="flex gap-2">
             <button onClick={() => setShowExportModal(true)} className="px-5 py-2.5 bg-white text-slate-950 rounded-xl text-xs font-black shadow-lg flex items-center gap-2 hover:bg-sky-50 transition-all active:scale-95 text-nowrap"><Download className="w-4 h-4 text-sky-500" /> 导出剧作 / Export</button>
           </div>
@@ -997,7 +1040,7 @@ ${charPrompt}
                                            <GripVertical className="w-3.5 h-3.5 opacity-30" />
                                         </div>
                                         <span className={`text-[9px] font-black px-4 py-1.5 rounded-full shadow-sm tracking-[0.1em] uppercase ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-black' : 'bg-pink-600 text-white'}`}>{el.type === 'dialogue' ? el.speaker : el.type === 'narration' ? '旁白' : '音效'}</span>
-                                        <span className={`text-[10px] font-mono opacity-20 font-black uppercase tracking-tighter`}>// {el.meta}</span>
+                                        <span className={`font-mono font-black uppercase tracking-tighter ${el.type === 'sound_effect' ? 'text-sm opacity-60' : 'text-[10px] opacity-20'}`}>// {el.meta}</span>
                                      </div>
                                      <button onClick={() => setEditingElementId(editingElementId === el.id ? null : el.id)} className={`p-2 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100' : 'hover:bg-white/10'} opacity-0 group-hover:opacity-100`}>
                                         <Pencil className={`w-3.5 h-3.5 ${editingElementId === el.id ? 'text-sky-500' : 'opacity-30'}`} />
@@ -1013,7 +1056,9 @@ ${charPrompt}
                                       className={`w-full bg-transparent !border-none !outline-none !ring-0 !shadow-none p-0 text-lg leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-white'} resize-none font-medium h-auto min-h-[100px]`}
                                     />
                                   ) : (
-                                    <p onClick={() => setEditingElementId(el.id)} className={`cursor-text ${el.type === 'dialogue' ? `text-lg font-medium leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-slate-100'}` : el.type === 'sound_effect' ? `text-base italic font-black ${theme === 'light' ? 'text-amber-700' : 'text-amber-400'}` : `text-lg font-medium leading-relaxed opacity-60 italic ${theme === 'light' ? 'text-slate-800' : 'text-slate-300'}`}`}>{el.content}</p>
+                                    <p onClick={() => setEditingElementId(el.id)} className={`cursor-text ${el.type === 'dialogue' ? `text-lg font-medium leading-relaxed ${theme === 'light' ? 'text-slate-900' : 'text-slate-100'}` : el.type === 'sound_effect' ? `text-lg italic font-black ${theme === 'light' ? 'text-amber-700' : 'text-amber-400'}` : `text-lg font-medium leading-relaxed opacity-60 italic ${theme === 'light' ? 'text-slate-800' : 'text-slate-300'}`}`}>
+                                      {el.content || (el.type === 'sound_effect' ? '' : '')}
+                                    </p>
                                   )}
                                </div>
                             </Reorder.Item>
@@ -1052,6 +1097,117 @@ ${charPrompt}
                  <div className="space-y-3"><label className="text-[10px] font-black opacity-40 uppercase tracking-[0.3em] ml-2">Actor Profile Instruction</label><textarea className={`w-full h-44 border rounded-[2.5rem] p-6 text-sm resize-none scrollbar-hide focus:border-sky-500 outline-none transition-all leading-relaxed ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.description} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, description: e.target.value } : c))} /></div>
               </div>
               <button onClick={() => setEditingCharId(null)} className={`w-full h-20 ${theme === 'light' ? 'bg-slate-900 text-white' : 'bg-white text-slate-950'} rounded-[2.5rem] mt-12 font-black shadow-2xl transition-all uppercase tracking-widest text-sm hover:translate-y-[-4px]`}>Submit Refinement</button>
+           </div>
+        </div>
+      )}
+
+      {showSettingsModal && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 backdrop-blur-md p-6">
+           <div className={`w-full max-w-2xl flex flex-col rounded-[2.5rem] p-8 lg:p-10 shadow-2xl relative ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`}>
+              <div className="flex justify-between items-center mb-8">
+                 <div>
+                    <h2 className="text-3xl font-black italic tracking-tighter">Settings / 全局配置</h2>
+                    <p className="text-sm opacity-50 font-bold mt-1 uppercase tracking-widest">Model & System Configuration</p>
+                 </div>
+                 <button onClick={() => setShowSettingsModal(false)} className="p-3 bg-black/5 hover:bg-black/10 rounded-full transition-all"><Plus className="w-6 h-6 rotate-45" /></button>
+              </div>
+
+              <div className="space-y-8">
+                <div className={`p-6 rounded-[1.5rem] border ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-white/5 border-white/10'}`}>
+                   <div className="flex items-center gap-3 mb-5">
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${theme === 'light' ? 'bg-indigo-500/10 text-indigo-500' : 'bg-indigo-500 text-white'}`}><Sparkles className="w-5 h-5" /></div>
+                      <div>
+                         <h3 className="font-black text-lg">AI Model / 推理大模型</h3>
+                         <p className="text-xs opacity-60 font-bold">选择用于生成剧本的底层模型，影响生成速度和质量。</p>
+                      </div>
+                   </div>
+                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                     {[
+                       { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite", desc: "速度最快" },
+                       { id: "gemini-3-flash-preview", name: "Gemini 3.0 Flash", desc: "日常任务首选" },
+                       { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", desc: "高复杂推理" },
+                       { id: "claude-3-5-sonnet-latest", name: "Claude 3.5 Sonnet", desc: "代码与长文" },
+                       { id: "gpt-4o", name: "GPT-4o", desc: "均衡/综合强" },
+                       { id: "deepseek-chat", name: "DeepSeek V3", desc: "平价长文本" },
+                     ].map(m => (
+                       <button
+                         key={m.id}
+                         onClick={() => setSelectedModel(m.id)}
+                         className={`text-left p-4 flex flex-col gap-1 rounded-xl border-2 transition-all ${selectedModel === m.id ? 'border-sky-500 bg-sky-500/10 shadow-md' : `border-transparent ${theme === 'light' ? 'bg-white shadow-sm hover:shadow-md' : 'bg-black/20 hover:bg-black/40'}`}`}
+                       >
+                         <span className="font-black text-[13px] break-all">{m.name}</span>
+                         <span className="font-bold text-[10px] opacity-60">{m.desc}</span>
+                       </button>
+                     ))}
+                   </div>
+                </div>
+
+                <div className={`p-6 rounded-[1.5rem] border ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-white/5 border-white/10'}`}>
+                   <div className="flex items-center gap-3 mb-5">
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${theme === 'light' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-emerald-500 text-white'}`}><Zap className="w-5 h-5" /></div>
+                      <div>
+                         <h3 className="font-black text-lg">自定义 API 配置 (Custom Proxy & Keys)</h3>
+                         <p className="text-xs opacity-60 font-bold">填入代理地址或其它厂商的 API Key。此配置优先于平台设定。</p>
+                      </div>
+                   </div>
+                   
+                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                     <div className="flex flex-col gap-2">
+                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">API Base URL</label>
+                       <input 
+                         type="text" 
+                         placeholder="默认官方 (适用OneAPI转发)" 
+                         value={localBaseUrl}
+                         onChange={(e) => setLocalBaseUrl(e.target.value)}
+                         className={`w-full px-4 py-3 rounded-xl border transition-all text-sm font-mono ${theme === 'light' ? 'bg-white border-slate-200 text-slate-800 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20' : 'bg-black/20 border-white/10 text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20'} outline-none`} 
+                       />
+                     </div>
+                     <div className="flex flex-col gap-2">
+                       <label className="text-[10px] font-black uppercase tracking-widest opacity-50">Custom API Key</label>
+                       <input 
+                         type="password" 
+                         placeholder="填入即可覆盖系统默认额度" 
+                         value={localApiKey}
+                         onChange={(e) => setLocalApiKey(e.target.value)}
+                         className={`w-full px-4 py-3 rounded-xl border transition-all text-sm font-mono ${theme === 'light' ? 'bg-white border-slate-200 text-slate-800 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20' : 'bg-black/20 border-white/10 text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20'} outline-none`} 
+                       />
+                     </div>
+                   </div>
+
+                   <div className="flex items-center justify-between pt-5 border-t border-emerald-500/10">
+                     <div className="flex items-center gap-2">
+                        {localApiKey || localBaseUrl ? (
+                          <div className="px-3 py-1 bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 rounded-full text-[10px] font-black flex items-center gap-1 uppercase tracking-widest">
+                             <CheckCircle2 className="w-3 h-3" /> Custom Config Active
+                          </div>
+                        ) : hasCustomApiKey ? (
+                          <div className="px-3 py-1 bg-sky-500/10 text-sky-600 border border-sky-500/20 rounded-full text-[10px] font-black flex items-center gap-1 uppercase tracking-widest">
+                             <CheckCircle2 className="w-3 h-3" /> AI Studio Secure Key Active
+                          </div>
+                        ) : (
+                          <div className="px-3 py-1 bg-amber-500/10 text-amber-600 border border-amber-500/20 rounded-full text-[10px] font-black flex items-center gap-1 uppercase tracking-widest">
+                             <AlertCircle className="w-3 h-3" /> Default Pool Quota
+                          </div>
+                        )}
+                     </div>
+                     {!localApiKey && (
+                       <button 
+                         onClick={async () => {
+                           if (window.aistudio?.openSelectKey) {
+                             await window.aistudio.openSelectKey();
+                             setHasCustomApiKey(true);
+                           } else {
+                             alert('该功能仅在实际部署环境中可用，或者您可以直接在上方输入 Custom API Key');
+                           }
+                         }}
+                         className={`px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all active:scale-95 shadow-sm ${theme === 'light' ? 'bg-slate-900 text-white hover:bg-emerald-600' : 'bg-emerald-500 text-white hover:bg-emerald-400'}`}
+                       >
+                         {hasCustomApiKey ? '更改平台安全 Key' : '绑定平台安全 Key'}
+                       </button>
+                     )}
+                   </div>
+                </div>
+              </div>
            </div>
         </div>
       )}
