@@ -570,26 +570,115 @@ ${charPrompt}
     } catch (e: any) { setError(`建模失败：${e.message}`); } finally { setIsProcessing(false); }
   };
 
-  const handleExportSingle = () => {
-    if (!currentChapter.scriptText) return;
-    const blob = new Blob([currentChapter.scriptText], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${projectName}_${currentChapter.title}.txt`;
-    a.click();
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<'txt' | 'markdown' | 'word'>('txt');
+  const [exportScope, setExportScope] = useState<'single' | 'all'>('single');
+
+  const generateChapterExport = (chap: Chapter, format: 'txt' | 'markdown' | 'word'): string => {
+    if (!chap.parsedElements || chap.parsedElements.length === 0) {
+      // Fallback for unparsed but generated raw script, although removing markers requires regex here
+      return chap.scriptText.replace(/\[[0-9,\s]+\]/g, "");
+    }
+
+    if (format === 'txt') {
+      return chap.parsedElements.map(el => {
+        const prefix = el.type === 'dialogue' ? `【${el.speaker}】` : el.type === 'narration' ? `【旁白】` : `【场景音】`;
+        return `${prefix}：（${el.meta}）${el.content}`;
+      }).join('\n\n');
+    }
+    
+    if (format === 'markdown') {
+      return chap.parsedElements.map(el => {
+        const prefix = el.type === 'dialogue' ? `**【${el.speaker}】**` : el.type === 'narration' ? `*【旁白】*` : `_【场景音】_`;
+        return `${prefix}：^（${el.meta}）^ ${el.content}`;
+      }).join('\n\n');
+    }
+    
+    if (format === 'word') {
+      const rows = chap.parsedElements.map(el => {
+        const color = el.type === 'dialogue' ? '#e11d48' : el.type === 'narration' ? '#0ea5e9' : '#d97706';
+        const name = el.type === 'dialogue' ? el.speaker : el.type === 'narration' ? '旁白' : '场景音效';
+        return `
+          <div style="margin-bottom: 12px; font-family: 'Microsoft YaHei', sans-serif; line-height: 1.6;">
+             <strong style="color: ${color};">【${name}】</strong>
+             <span style="color: #666666; font-style: italic;">（${el.meta}）</span>
+             <span style="font-size: 16px; color: #333333;">${el.content}</span>
+          </div>`;
+      }).join('');
+      return rows;
+    }
+    
+    return "";
   };
 
-  const handleExportMerged = () => {
-    const generatedChapters = chapters.filter(c => c.scriptText.trim() !== "");
-    if (generatedChapters.length === 0) { setError("没有可导出的已生成剧本"); return; }
-    const mergedContent = generatedChapters.map(c => `================ ${c.title} ================\n\n${c.scriptText}\n\n`).join("\n");
-    const blob = new Blob([mergedContent], { type: "text/plain" });
+  const executeExport = () => {
+    let finalContent = "";
+    let mimeType = "text/plain";
+    let extension = "txt";
+    let fileName = "";
+
+    if (exportFormat === 'word') {
+      mimeType = "application/msword";
+      extension = "doc";
+    } else if (exportFormat === 'markdown') {
+      extension = "md";
+    }
+
+    if (exportScope === 'single') {
+      if (!currentChapter.scriptText) {
+        setError("当前章节没有可导出的剧本");
+        return;
+      }
+      fileName = `${projectName}_${currentChapter.title}.${extension}`;
+      if (exportFormat === 'word') {
+        finalContent = `
+          <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+          <head><meta charset='utf-8'><title>${currentChapter.title}</title></head>
+          <body>
+            <h1 style="text-align: center; font-family: 'Microsoft YaHei', sans-serif;">${currentChapter.title}</h1>
+            ${generateChapterExport(currentChapter, exportFormat)}
+          </body>
+          </html>
+        `;
+      } else {
+        finalContent = generateChapterExport(currentChapter, exportFormat);
+      }
+    } else {
+      const generatedChapters = chapters.filter(c => c.scriptText.trim() !== "");
+      if (generatedChapters.length === 0) {
+        setError("没有可导出的已生成剧本");
+        return;
+      }
+      fileName = `${projectName}_全本合并.${extension}`;
+      
+      if (exportFormat === 'word') {
+        const body = generatedChapters.map(c => `
+          <h1 style="text-align: center; font-family: 'Microsoft YaHei', sans-serif; page-break-before: always;">${c.title}</h1>
+          ${generateChapterExport(c, exportFormat)}
+        `).join('');
+        finalContent = `
+          <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+          <head><meta charset='utf-8'><title>${projectName}</title></head>
+          <body>${body}</body>
+          </html>
+        `;
+      } else {
+        const divider = exportFormat === 'markdown' ? '\n\n---\n\n' : '\n\n================================\n\n';
+        finalContent = generatedChapters.map(c => {
+          const titleLine = exportFormat === 'markdown' ? `## ${c.title}` : `[ ${c.title} ]`;
+          return `${titleLine}\n\n${generateChapterExport(c, exportFormat)}`;
+        }).join(divider);
+      }
+    }
+
+    const blob = new Blob([finalContent], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${projectName}_合并.txt`;
+    a.download = fileName;
     a.click();
+    URL.revokeObjectURL(url);
+    setShowExportModal(false);
   };
 
   const totalNovelWords = useMemo(() => chapters.reduce((sum, ch) => sum + ch.novelText.length, 0), [chapters]);
@@ -641,8 +730,7 @@ ${charPrompt}
             ))}
           </div>
           <div className="flex gap-2">
-            <button disabled={!currentChapter.scriptText} onClick={handleExportSingle} className={`px-4 py-2 ${theme === 'light' ? 'bg-slate-100' : 'bg-slate-800'} border ${currentTheme.border} rounded-xl text-xs font-black flex items-center gap-2 hover:opacity-80 transition-all disabled:opacity-20`}><Download className="w-3.5 h-3.5" /> 导出本章</button>
-            <button onClick={handleExportMerged} className="px-4 py-2 bg-white text-slate-950 rounded-xl text-xs font-black shadow-lg flex items-center gap-2 hover:bg-sky-50 transition-all active:scale-95 text-nowrap"><Download className="w-3.5 h-3.5" /> 全本合并</button>
+            <button onClick={() => setShowExportModal(true)} className="px-5 py-2.5 bg-white text-slate-950 rounded-xl text-xs font-black shadow-lg flex items-center gap-2 hover:bg-sky-50 transition-all active:scale-95 text-nowrap"><Download className="w-4 h-4 text-sky-500" /> 导出剧作 / Export</button>
           </div>
         </div>
       </nav>
@@ -964,6 +1052,57 @@ ${charPrompt}
                  <div className="space-y-3"><label className="text-[10px] font-black opacity-40 uppercase tracking-[0.3em] ml-2">Actor Profile Instruction</label><textarea className={`w-full h-44 border rounded-[2.5rem] p-6 text-sm resize-none scrollbar-hide focus:border-sky-500 outline-none transition-all leading-relaxed ${theme === 'light' ? 'bg-slate-50 border-slate-200' : 'bg-black/40 border-white/5'}`} value={characters.find(c => c.id === editingCharId)?.description} onChange={e => setCharacters(prev => prev.map(c => c.id === editingCharId ? { ...c, description: e.target.value } : c))} /></div>
               </div>
               <button onClick={() => setEditingCharId(null)} className={`w-full h-20 ${theme === 'light' ? 'bg-slate-900 text-white' : 'bg-white text-slate-950'} rounded-[2.5rem] mt-12 font-black shadow-2xl transition-all uppercase tracking-widest text-sm hover:translate-y-[-4px]`}>Submit Refinement</button>
+           </div>
+        </div>
+      )}
+
+      {showExportModal && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 backdrop-blur-md p-6">
+           <div className={`w-full max-w-lg flex flex-col rounded-[2rem] p-8 shadow-2xl relative ${theme === 'light' ? 'bg-white text-slate-900' : 'bg-slate-900 text-white border border-white/10'}`}>
+              <div className="flex justify-between items-center mb-8">
+                 <h2 className="text-2xl font-black italic tracking-tighter">Export Script</h2>
+                 <button onClick={() => setShowExportModal(false)} className="p-2 hover:bg-black/10 rounded-full transition-all"><Plus className="w-6 h-6 rotate-45" /></button>
+              </div>
+
+              <div className="mb-6">
+                <label className="block text-sm font-black mb-3 opacity-60 uppercase tracking-widest">Scope / 导出范围</label>
+                <div className="flex gap-3">
+                  <button onClick={() => setExportScope('single')} className={`flex-1 py-3 px-4 rounded-xl border-2 font-bold transition-all ${exportScope === 'single' ? 'border-sky-500 text-sky-500 bg-sky-500/10' : `border-transparent ${theme === 'light' ? 'bg-slate-100 text-slate-600' : 'bg-white/5 text-slate-400'}`}`}>
+                    当前章节
+                  </button>
+                  <button onClick={() => setExportScope('all')} className={`flex-1 py-3 px-4 rounded-xl border-2 font-bold transition-all ${exportScope === 'all' ? 'border-sky-500 text-sky-500 bg-sky-500/10' : `border-transparent ${theme === 'light' ? 'bg-slate-100 text-slate-600' : 'bg-white/5 text-slate-400'}`}`}>
+                    全本合并
+                  </button>
+                </div>
+              </div>
+
+              <div className="mb-8">
+                <label className="block text-sm font-black mb-3 opacity-60 uppercase tracking-widest">Format / 文件格式</label>
+                <div className="flex flex-col gap-3">
+                  <button onClick={() => setExportFormat('txt')} className={`text-left flex items-center justify-between p-4 rounded-xl border-2 transition-all ${exportFormat === 'txt' ? 'border-amber-500 bg-amber-500/10' : `border-transparent ${theme === 'light' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-white/5 hover:bg-white/10'}`}`}>
+                    <div>
+                      <div className="font-bold">纯文本 (.txt)</div>
+                      <div className="text-xs opacity-60 mt-1">标准格式，不带任何样式</div>
+                    </div>
+                  </button>
+                  <button onClick={() => setExportFormat('word')} className={`text-left flex items-center justify-between p-4 rounded-xl border-2 transition-all ${exportFormat === 'word' ? 'border-sky-500 bg-sky-500/10' : `border-transparent ${theme === 'light' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-white/5 hover:bg-white/10'}`}`}>
+                    <div>
+                      <div className="font-bold">Word 文档兼容富文本 (.doc)</div>
+                      <div className="text-xs opacity-60 mt-1">带有颜色区分的呈现格式，可用于汇报或审阅</div>
+                    </div>
+                  </button>
+                  <button onClick={() => setExportFormat('markdown')} className={`text-left flex items-center justify-between p-4 rounded-xl border-2 transition-all ${exportFormat === 'markdown' ? 'border-emerald-500 bg-emerald-500/10' : `border-transparent ${theme === 'light' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-white/5 hover:bg-white/10'}`}`}>
+                    <div>
+                      <div className="font-bold">Markdown (.md)</div>
+                      <div className="text-xs opacity-60 mt-1">适合导入富文本编辑器或其他支持Markdown的系统</div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              <button onClick={executeExport} className={`w-full py-4 rounded-xl font-black shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 ${theme === 'light' ? 'bg-slate-900 text-white hover:bg-sky-600' : 'bg-sky-500 text-white hover:bg-sky-400'}`}>
+                <Download className="w-5 h-5" /> 立即导出 (Execute Export)
+              </button>
            </div>
         </div>
       )}
