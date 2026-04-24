@@ -11,7 +11,7 @@ import {
   AlertCircle, Music4, BookOpen, Plus, LayoutGrid, ChevronRight, 
   Eye, EyeOff, Maximize2, Minimize2, Palette, Sun, Moon, Leaf,
   FolderOpen, Save, FileJson, Share2, Clock, Check, GripVertical, 
-  Activity, Pencil
+  Activity, Pencil, ChevronDown
 } from "lucide-react";
 import { motion, AnimatePresence, Reorder } from "motion/react";
 
@@ -1042,7 +1042,30 @@ ${charPrompt}
                                         <div className={`p-1.5 rounded-lg ${theme === 'light' ? 'bg-slate-100' : 'bg-white/5'} opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing`}>
                                            <GripVertical className="w-3.5 h-3.5 opacity-30" />
                                         </div>
-                                        <span className={`text-[9px] font-black px-4 py-1.5 rounded-full shadow-sm tracking-[0.1em] uppercase ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-black' : 'bg-pink-600 text-white'}`}>{el.type === 'dialogue' ? el.speaker : el.type === 'narration' ? '旁白' : '音效'}</span>
+                                        <div className="relative flex-shrink-0">
+                                           <select 
+                                              value={el.type === 'dialogue' && el.speaker ? el.speaker : el.type}
+                                              onChange={(e) => {
+                                                const val = e.target.value;
+                                                if (val === 'narration') updateScriptElement(el.id, { type: 'narration', speaker: '' });
+                                                else if (val === 'sound_effect') updateScriptElement(el.id, { type: 'sound_effect', speaker: '' });
+                                                else updateScriptElement(el.id, { type: 'dialogue', speaker: val });
+                                              }}
+                                              className={`appearance-none outline-none border-none text-[10px] sm:text-xs font-black tracking-widest pl-4 pr-8 py-1.5 rounded-full shadow-sm cursor-pointer ${el.type === 'narration' ? 'bg-sky-600 text-white' : el.type === 'sound_effect' ? 'bg-amber-500 text-amber-950' : 'bg-pink-600 text-white'}`}
+                                           >
+                                              <option value="narration" className="text-slate-900 bg-white text-sm font-medium py-1">旁白</option>
+                                              <option value="sound_effect" className="text-slate-900 bg-white text-sm font-medium py-1">音效</option>
+                                              <optgroup label="── 角色 ──" className="text-slate-400 bg-slate-50 text-xs font-bold pt-2 mt-1">
+                                                {characters.filter(c => c.id !== 'nar').map((char) => (
+                                                   <option key={char.id} value={char.name} className="text-slate-900 bg-white text-sm font-medium py-1">{char.name}</option>
+                                                ))}
+                                              </optgroup>
+                                              {el.type === 'dialogue' && !characters.find(c => c.name === el.speaker) && el.speaker && (
+                                                <option value={el.speaker} className="text-slate-900 bg-white text-sm font-medium py-1">{el.speaker} (未知角色)</option>
+                                              )}
+                                           </select>
+                                           <ChevronDown className="w-3 h-3 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-60 text-current" />
+                                        </div>
                                         {el.type !== 'sound_effect' && <span className="font-mono font-black uppercase tracking-tighter text-[10px] opacity-20">// {el.meta}</span>}
                                      </div>
                                      <button onClick={() => setEditingElementId(editingElementId === el.id ? null : el.id)} className={`p-2 rounded-xl transition-all ${theme === 'light' ? 'hover:bg-slate-100' : 'hover:bg-white/10'} opacity-0 group-hover:opacity-100`}>
