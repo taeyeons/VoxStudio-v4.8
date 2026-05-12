@@ -1397,11 +1397,11 @@ ${previousContext}
       const sample = chapters.slice(0, 10).map(c => c.novelText).join("\n\n").slice(0, 12000);
       const voiceCatalogPrompt = EDGE_VOICES_CATALOG.map(v => `${v.id} (${v.desc})`).join(", ");
       
-      const prompt = `你是一个资深文学编辑与有声书选角导演。请提取小说全部角色，并根据角色性格从给定音色库中分配最匹配的音色。
+      const prompt = `你是一个资深文学编辑与有声书选角导演。请提取小说全部角色，并根据角色性格与描述从给定音色库中分配最匹配的音色与语气。请务必使用中文回答所有内容（包括性格特征与简介）。
 【可用音色库】：${voiceCatalogPrompt}
 
 输出严格 JSON 数组格式，不要任何 Markdown 标记。哪怕只提取到一个，也必须是合法的带有结尾大括号的JSON数组！
-字段：[{"name":"姓名","gender":"性别","age":"年龄段","tone":"性格特征","description":"背景简介", "voiceId":"必须从上面的库中选择"}]
+字段：[{"name":"姓名","gender":"性别","age":"年龄段","tone":"语气与性格特征","description":"背景简介","voiceId":"必须从上面的库中选择"}]
 文本：\n${sample}`;
 
       let rawText = await generateAiContent({ model: localStorage.getItem('vox_custom_model') || selectedModel, prompt, jsonMode: true }) || "[]";
