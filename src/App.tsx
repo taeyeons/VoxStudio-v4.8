@@ -291,7 +291,7 @@ export default function App() {
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const visualizerCanvasRef = useRef<HTMLCanvasElement>(null);
   
-  const currentChapter = chapters.find(c => c.id === currentChapterId) || chapters[0];
+  const currentChapter = chapters.find(c => c.id === currentChapterId) || chapters[0] || { id: "ch-1", title: "点击输入原文", novelText: "", scriptText: "", parsedElements: [] };
   const [complianceIssues, setComplianceIssues] = useState<Record<string, string[]>>({});
 
   const sourceScrollRef = useRef<HTMLDivElement>(null);
